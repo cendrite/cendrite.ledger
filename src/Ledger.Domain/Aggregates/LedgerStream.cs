@@ -26,7 +26,7 @@ public sealed class LedgerStream : AggregateRoot
 
     public LedgerStream(Guid id, byte[] createWriteKey) : base(id)
     {
-        _writeKeys.Add(new LedgerWriteKey(id, createWriteKey, WriteKeyRole.Owner));
+        _writeKeys.Add(new LedgerWriteKey(id, createWriteKey, WriteKeyRole.Owner, isInvite: false));
     }
 
     public bool HasWriteKey(byte[] publicKey) => _writeKeys.Any(wk => wk.PublicKey.SequenceEqual(publicKey));
@@ -45,7 +45,11 @@ public sealed class LedgerStream : AggregateRoot
             || eventHash.Length != HashLength
             || writeKeyPublic.Length != KeyLength
             || signature.Length != SignatureLength
-            || keyChanges.Added.Concat(keyChanges.InvitesAdded).Concat(keyChanges.Removed).Any(k => k.Length != KeyLength))
+            || keyChanges.Added
+                .Concat(keyChanges.InvitesAdded.Select(g => g.PublicKey))
+                .Concat(keyChanges.Removed)
+                .Concat(keyChanges.RolesChanged.Select(g => g.PublicKey))
+                .Any(k => k.Length != KeyLength))
             throw new ArgumentException("Malformed append.");
 
         if (Archived)
@@ -56,13 +60,16 @@ public sealed class LedgerStream : AggregateRoot
         if (signer is null)
             return Result.Fail<LedgerEvent>(Error.Forbidden("Write key is not authorized for this ledger."));
 
-        if (signer.Role is WriteKeyRole.Invite && !IsSelfSwap(writeKeyPublic, keyChanges))
+        if (signer.IsInvite && !IsSelfSwap(writeKeyPublic, keyChanges))
             return Result.Fail<LedgerEvent>(Error.Forbidden("An invite key may only register its own write key."));
+
+        if (!signer.IsInvite && RefusalFor(signer, keyChanges) is { } refusal)
+            return Result.Fail<LedgerEvent>(refusal);
 
         if (expectedVersion != Version || !previousHash.AsSpan().SequenceEqual(Hash))
             return Result.Fail<LedgerEvent>(Error.Conflict($"Ledger is at version {Version}, append expected {expectedVersion}."));
 
-        var remaining = _writeKeys.Count(k => k.Role is not WriteKeyRole.Invite && !keyChanges.Removed.Any(r => r.AsSpan().SequenceEqual(k.PublicKey)))
+        var remaining = _writeKeys.Count(k => !k.IsInvite && !keyChanges.Removed.Any(r => r.AsSpan().SequenceEqual(k.PublicKey)))
                         + keyChanges.Added.Count(k => !HasWriteKey(k));
 
         if (remaining == 0)
@@ -76,10 +83,13 @@ public sealed class LedgerStream : AggregateRoot
             _writeKeys.RemoveAll(k => k.PublicKey.AsSpan().SequenceEqual(key));
 
         foreach (var key in keyChanges.Added.Where(k => !HasWriteKey(k)))
-            _writeKeys.Add(new LedgerWriteKey(Id, key, WriteKeyRole.Writer));
+            _writeKeys.Add(new LedgerWriteKey(Id, key, signer.Role, isInvite: false));
 
-        foreach (var key in keyChanges.InvitesAdded.Where(k => !HasWriteKey(k)))
-            _writeKeys.Add(new LedgerWriteKey(Id, key, WriteKeyRole.Invite));
+        foreach (var grant in keyChanges.InvitesAdded.Where(g => !HasWriteKey(g.PublicKey)))
+            _writeKeys.Add(new LedgerWriteKey(Id, grant.PublicKey, grant.Role, isInvite: true));
+
+        foreach (var grant in keyChanges.RolesChanged)
+            KeyOf(grant.PublicKey)?.ChangeRole(grant.Role);
 
         Version = evt.Version;
         Hash = eventHash;
@@ -93,7 +103,7 @@ public sealed class LedgerStream : AggregateRoot
         byte[] payload,
         byte[] eventhash,
         byte[] signature,
-        IReadOnlyCollection<byte[]> inviteKeysAdded)
+        IReadOnlyCollection<KeyGrant> inviteKeysAdded)
     {
         var ledger = new LedgerStream(id, creatorWriteKey);
 
@@ -104,7 +114,7 @@ public sealed class LedgerStream : AggregateRoot
             payload: payload,
             writeKeyPublic: creatorWriteKey,
             signature: signature,
-            keyChanges: new KeyChanges([], inviteKeysAdded, []));
+            keyChanges: new KeyChanges([], inviteKeysAdded, [], []));
 
         return append.Success ? ledger : Result.Fail<LedgerStream>(append.Error);
     }
@@ -136,8 +146,37 @@ public sealed class LedgerStream : AggregateRoot
 
     private bool IsSelfSwap(byte[] signer, KeyChanges keyChanges) =>
         keyChanges.InvitesAdded.Count == 0
+        && keyChanges.RolesChanged.Count == 0
         && keyChanges.Added.Count == 1
         && !HasWriteKey(keyChanges.Added.First())
         && keyChanges.Removed.Count == 1
         && keyChanges.Removed.First().AsSpan().SequenceEqual(signer);
+
+    private Error? RefusalFor(LedgerWriteKey signer, KeyChanges keyChanges)
+    {
+        if (keyChanges.Added.Count > 0)
+            return Error.Forbidden("Write keys may only be added by swapping an invite key.");
+
+        if (keyChanges.InvitesAdded.Any(g => g.Role > signer.Role))
+            return Error.Forbidden("An invite may not carry a higher role than its author's key.");
+
+        if (keyChanges.Removed.Select(KeyOf).Any(target => target is not null && !MayRemove(signer, target)))
+            return Error.Forbidden("This key may not remove that key.");
+
+        if (keyChanges.RolesChanged.Count > 0 && signer.Role is not WriteKeyRole.Owner)
+            return Error.Forbidden("Only an owner key may change roles.");
+
+        if (keyChanges.RolesChanged.Any(g => KeyOf(g.PublicKey) is null))
+            return Error.Validation("A role change names a key that is not in this ledger.");
+
+        return null;
+    }
+
+    private static bool MayRemove(LedgerWriteKey signer, LedgerWriteKey target) =>
+        target == signer
+        || signer.Role is WriteKeyRole.Owner
+        || (signer.Role is WriteKeyRole.Admin && target.Role < signer.Role);
+
+    private LedgerWriteKey? KeyOf(byte[] publicKey) =>
+        _writeKeys.FirstOrDefault(k => k.PublicKey.AsSpan().SequenceEqual(publicKey));
 }

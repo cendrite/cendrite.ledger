@@ -7,11 +7,12 @@ public sealed class LedgerWriteKey : Entity
 {
     public Guid StreamId { get; private set; }
     public byte[] PublicKey { get; private set; } = [32];
-    public WriteKeyRole Role { get; private set; } 
+    public WriteKeyRole Role { get; private set; }
+    public bool IsInvite { get; private set; }
 
     private LedgerWriteKey(Guid id) : base(id) { } // For EF Core
 
-    internal LedgerWriteKey(Guid ledgerId, byte[] publicKey, WriteKeyRole role) : base(Guid.NewGuid())
+    internal LedgerWriteKey(Guid ledgerId, byte[] publicKey, WriteKeyRole role, bool isInvite) : base(Guid.NewGuid())
     {
         if (publicKey.Length != 32)
             throw new ArgumentException("Public key must be 32 bytes long.", nameof(publicKey));
@@ -19,5 +20,8 @@ public sealed class LedgerWriteKey : Entity
         StreamId = ledgerId;
         PublicKey = publicKey;
         Role = role;
+        IsInvite = isInvite;
     }
+
+    internal void ChangeRole(WriteKeyRole role) => Role = role;
 }

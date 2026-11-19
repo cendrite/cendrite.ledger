@@ -30,6 +30,10 @@ public sealed class LedgerWriteKeyModelConfiguration : BaseModelConfiguration<Le
             .HasColumnName("role")
             .IsRequired();
 
+        builder.Property(x => x.IsInvite)
+            .HasColumnName("is_invite")
+            .IsRequired();
+
         builder.HasIndex(x => new { x.StreamId, x.PublicKey })
             .IsUnique();
 

@@ -17,8 +17,10 @@ public sealed class AppendLedgerEventCommandValidator : AbstractValidator<Append
         RuleFor(x => x.KeyChanges.Added).NotNull().Must(k => k.Count <= LedgerQueryLimits.MaxKeysPerEvent);
         RuleForEach(x => x.KeyChanges.Added).Must(k => k.Length == 32);
         RuleFor(x => x.KeyChanges.InvitesAdded).NotNull().Must(k => k.Count <= LedgerQueryLimits.MaxKeysPerEvent);
-        RuleForEach(x => x.KeyChanges.InvitesAdded).Must(k => k.Length == 32);
+        RuleForEach(x => x.KeyChanges.InvitesAdded).Must(g => g.PublicKey.Length == 32 && Enum.IsDefined(g.Role));
         RuleFor(x => x.KeyChanges.Removed).NotNull().Must(k => k.Count <= LedgerQueryLimits.MaxKeysPerEvent);
         RuleForEach(x => x.KeyChanges.Removed).Must(k => k.Length == 32);
+        RuleFor(x => x.KeyChanges.RolesChanged).NotNull().Must(k => k.Count <= LedgerQueryLimits.MaxKeysPerEvent);
+        RuleForEach(x => x.KeyChanges.RolesChanged).Must(g => g.PublicKey.Length == 32 && Enum.IsDefined(g.Role));
     }
 }
