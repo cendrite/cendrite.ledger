@@ -22,7 +22,8 @@ public class LedgerStreamTest
         byte[][]? removed = null,
         int? expectedVersion = null,
         byte[]? previousHash = null,
-        byte[][]? invites = null)
+        KeyGrant[]? invites = null,
+        KeyGrant[]? roles = null)
     {
         return ledger.Append(
             expectedVersion ?? ledger.Version,
@@ -31,7 +32,7 @@ public class LedgerStreamTest
             [1, 2, 3],
             writeKey,
             Bytes(0x00, 64),
-            new KeyChanges(added ?? [], invites ?? [], removed ?? []));
+            new KeyChanges(added ?? [], invites ?? [], removed ?? [], roles ?? []));
     }
 
     private static Result<LedgerEvent> Archive(
@@ -135,38 +136,29 @@ public class LedgerStreamTest
     public void Append_ShouldRecordKeyMutations_OnEvent()
     {
         var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
-        Append(ledger, CreatorKey, Bytes(0x01, 32), added: [OtherKey]);
+        Append(ledger, CreatorKey, Bytes(0x01, 32), invites: [Writer(InviteKey)]);
 
-        var result = Append(ledger, CreatorKey, Bytes(0x02, 32), removed: [OtherKey]);
+        var swap = Append(ledger, InviteKey, Bytes(0x02, 32), added: [OtherKey], removed: [InviteKey]);
+        var role = Append(ledger, CreatorKey, Bytes(0x03, 32), roles: [Admin(OtherKey)]);
 
-        ledger.Events.First().KeysAdded.Should().ContainSingle().Which.Should().Equal(OtherKey);
-        ledger.Events.First().KeysRemoved.Should().BeEmpty();
-        result.RequiredValue.KeysRemoved.Should().ContainSingle().Which.Should().Equal(OtherKey);
-        result.RequiredValue.KeysAdded.Should().BeEmpty();
-    }
-
-    [Fact]
-    public void Append_ShouldGrantKey_WhenKeyAdded()
-    {
-        var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
-
-        Append(ledger, CreatorKey, Bytes(0x01, 32), added: [OtherKey]);
-        var result = Append(ledger, OtherKey, Bytes(0x02, 32));
-
-        result.Success.Should().BeTrue();
-        result.RequiredValue.WriteKeyPublic.Should().Equal(OtherKey);
-        ledger.HasWriteKey(OtherKey).Should().BeTrue();
-        ledger.WriteKeys.Should().HaveCount(2);
+        var invite = ledger.Events.First().InvitesAdded.Should().ContainSingle().Subject;
+        invite.PublicKey.Should().Equal(InviteKey);
+        invite.Role.Should().Be(WriteKeyRole.Writer);
+        swap.RequiredValue.KeysAdded.Should().ContainSingle().Which.Should().Equal(OtherKey);
+        swap.RequiredValue.KeysRemoved.Should().ContainSingle().Which.Should().Equal(InviteKey);
+        var change = role.RequiredValue.RolesChanged.Should().ContainSingle().Subject;
+        change.PublicKey.Should().Equal(OtherKey);
+        change.Role.Should().Be(WriteKeyRole.Admin);
     }
 
     [Fact]
     public void Append_ShouldRevokeKey_WhenKeyRemoved()
     {
         var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
-        Append(ledger, CreatorKey, Bytes(0x01, 32), added: [OtherKey]);
+        Join(ledger, OtherKey, WriteKeyRole.Writer);
 
-        Append(ledger, CreatorKey, Bytes(0x02, 32), removed: [OtherKey]);
-        var result = Append(ledger, OtherKey, Bytes(0x03, 32));
+        Append(ledger, CreatorKey, Bytes(0x10, 32), removed: [OtherKey]);
+        var result = Append(ledger, OtherKey, Bytes(0x11, 32));
 
         ledger.HasWriteKey(OtherKey).Should().BeFalse();
         result.Success.Should().BeFalse();
@@ -174,27 +166,15 @@ public class LedgerStreamTest
     }
 
     [Fact]
-    public void Append_ShouldNotDuplicateKey_WhenKeyAlreadyPresent()
+    public void Append_ShouldRefuseAddedKeys_FromAWriteKey()
     {
         var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
 
-        var result = Append(ledger, CreatorKey, Bytes(0x01, 32), added: [CreatorKey, OtherKey, OtherKey]);
+        var result = Append(ledger, CreatorKey, Bytes(0x01, 32), added: [OtherKey]);
 
-        result.Success.Should().BeTrue();
-        ledger.WriteKeys.Should().HaveCount(2);
-    }
-
-    [Fact]
-    public void Append_ShouldAllowKeySwap_WhenRemovingLastKeyAndAddingAnother()
-    {
-        var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
-
-        var result = Append(ledger, CreatorKey, Bytes(0x01, 32), added: [OtherKey], removed: [CreatorKey]);
-
-        result.Success.Should().BeTrue();
-        ledger.WriteKeys.Should().ContainSingle();
-        ledger.HasWriteKey(OtherKey).Should().BeTrue();
-        ledger.HasWriteKey(CreatorKey).Should().BeFalse();
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+        ShouldBeUnchanged(ledger, 0, new byte[32], 0, CreatorKey);
     }
 
     [Fact]
@@ -273,6 +253,7 @@ public class LedgerStreamTest
         "shortAddedKey",
         "shortInviteKey",
         "shortRemovedKey",
+        "shortRoleKey",
     ];
 
     [Theory]
@@ -290,8 +271,9 @@ public class LedgerStreamTest
             signature: input == "shortSignature" ? Bytes(0x00, 63) : Bytes(0x00, 64),
             keyChanges: new KeyChanges(
                 input == "shortAddedKey" ? [OtherKey, Bytes(0xD4, 31)] : [],
-                input == "shortInviteKey" ? [Bytes(0xD4, 31)] : [],
-                input == "shortRemovedKey" ? [Bytes(0xD4, 31)] : []));
+                input == "shortInviteKey" ? [Writer(Bytes(0xD4, 31))] : [],
+                input == "shortRemovedKey" ? [Bytes(0xD4, 31)] : [],
+                input == "shortRoleKey" ? [Writer(Bytes(0xD4, 31))] : []));
 
         act.Should().Throw<ArgumentException>();
         ShouldBeUnchanged(ledger, 0, new byte[32], 0, CreatorKey);
@@ -342,57 +324,86 @@ public class LedgerStreamTest
 
     private static readonly byte[] InviteKey = Bytes(0xE5, 32);
     private static readonly byte[] SwappedKey = Bytes(0xF6, 32);
+    private static readonly byte[] AdminKey = Bytes(0x9A, 32);
+    private static readonly byte[] SecondAdminKey = Bytes(0x9B, 32);
+    private static readonly byte[] SecondWriterKey = Bytes(0x8C, 32);
+
+    private static KeyGrant Writer(byte[] key) => new(key, WriteKeyRole.Writer);
+    private static KeyGrant Admin(byte[] key) => new(key, WriteKeyRole.Admin);
+    private static KeyGrant Owner(byte[] key) => new(key, WriteKeyRole.Owner);
+
+    private static void Join(LedgerStream ledger, byte[] key, WriteKeyRole role)
+    {
+        var invite = Bytes((byte)(key[0] ^ 0xFF), 32);
+        Append(ledger, CreatorKey, Bytes((byte)(ledger.Version + 1), 32), invites: [new KeyGrant(invite, role)]).Success.Should().BeTrue();
+        Append(ledger, invite, Bytes((byte)(ledger.Version + 1), 32), added: [key], removed: [invite]).Success.Should().BeTrue();
+    }
 
     private static LedgerStream LedgerWithInvite()
     {
         var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
-        Append(ledger, CreatorKey, Bytes(0x01, 32), invites: [InviteKey]);
+        Append(ledger, CreatorKey, Bytes(0x01, 32), invites: [Writer(InviteKey)]);
         return ledger;
     }
 
-    private static WriteKeyRole RoleOf(LedgerStream ledger, byte[] key) =>
-        ledger.WriteKeys.Single(k => k.PublicKey.SequenceEqual(key)).Role;
+    private static LedgerStream LedgerWithMembers()
+    {
+        var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
+        Join(ledger, AdminKey, WriteKeyRole.Admin);
+        Join(ledger, SecondAdminKey, WriteKeyRole.Admin);
+        Join(ledger, OtherKey, WriteKeyRole.Writer);
+        Join(ledger, SecondWriterKey, WriteKeyRole.Writer);
+        return ledger;
+    }
+
+    private static LedgerWriteKey KeyOf(LedgerStream ledger, byte[] key) =>
+        ledger.WriteKeys.Single(k => k.PublicKey.SequenceEqual(key));
 
     [Fact]
-    public void Append_ShouldStoreInviteKeys_WithInviteRole()
+    public void Constructor_ShouldMakeCreatorKeyOwner()
+    {
+        var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
+
+        KeyOf(ledger, CreatorKey).Role.Should().Be(WriteKeyRole.Owner);
+        KeyOf(ledger, CreatorKey).IsInvite.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Append_ShouldStoreInviteKeys_WithTheirRole()
     {
         var ledger = LedgerWithInvite();
 
         ledger.HasWriteKey(InviteKey).Should().BeTrue();
-        RoleOf(ledger, InviteKey).Should().Be(WriteKeyRole.Invite);
-        RoleOf(ledger, CreatorKey).Should().Be(WriteKeyRole.Owner);
-        ledger.Events.Single().InviteKeysAdded.Should().ContainSingle().Which.Should().Equal(InviteKey);
-    }
-
-    [Fact]
-    public void Append_ShouldAddKeysAsWriters()
-    {
-        var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
-
-        Append(ledger, CreatorKey, Bytes(0x01, 32), added: [OtherKey]);
-
-        RoleOf(ledger, OtherKey).Should().Be(WriteKeyRole.Writer);
+        KeyOf(ledger, InviteKey).IsInvite.Should().BeTrue();
+        KeyOf(ledger, InviteKey).Role.Should().Be(WriteKeyRole.Writer);
     }
 
     [Fact]
     public void Initialize_ShouldStoreInviteKeys()
     {
-        var ledger = LedgerStream.Initialize(Guid.NewGuid(), CreatorKey, [1, 2, 3], Bytes(0x01, 32), Bytes(0x00, 64), [InviteKey, OtherKey]).RequiredValue;
+        var ledger = LedgerStream.Initialize(Guid.NewGuid(), CreatorKey, [1, 2, 3], Bytes(0x01, 32), Bytes(0x00, 64), [Writer(InviteKey), Admin(OtherKey)]).RequiredValue;
 
-        RoleOf(ledger, InviteKey).Should().Be(WriteKeyRole.Invite);
-        RoleOf(ledger, OtherKey).Should().Be(WriteKeyRole.Invite);
+        KeyOf(ledger, InviteKey).IsInvite.Should().BeTrue();
+        KeyOf(ledger, InviteKey).Role.Should().Be(WriteKeyRole.Writer);
+        KeyOf(ledger, OtherKey).IsInvite.Should().BeTrue();
+        KeyOf(ledger, OtherKey).Role.Should().Be(WriteKeyRole.Admin);
     }
 
-    [Fact]
-    public void Append_ShouldAllowInviteSelfSwap()
+    [Theory]
+    [InlineData(WriteKeyRole.Writer)]
+    [InlineData(WriteKeyRole.Admin)]
+    [InlineData(WriteKeyRole.Owner)]
+    public void Append_ShouldGiveSwappedKey_TheInvitesRole(WriteKeyRole role)
     {
-        var ledger = LedgerWithInvite();
+        var ledger = new LedgerStream(Guid.NewGuid(), CreatorKey);
+        Append(ledger, CreatorKey, Bytes(0x01, 32), invites: [new KeyGrant(InviteKey, role)]);
 
         var result = Append(ledger, InviteKey, Bytes(0x02, 32), added: [SwappedKey], removed: [InviteKey]);
 
         result.Success.Should().BeTrue();
         ledger.HasWriteKey(InviteKey).Should().BeFalse();
-        RoleOf(ledger, SwappedKey).Should().Be(WriteKeyRole.Writer);
+        KeyOf(ledger, SwappedKey).IsInvite.Should().BeFalse();
+        KeyOf(ledger, SwappedKey).Role.Should().Be(role);
     }
 
     [Fact]
@@ -415,6 +426,7 @@ public class LedgerStreamTest
         "addInvite",
         "addExistingKey",
         "removeSelfOnly",
+        "changeRole",
     ];
 
     [Theory]
@@ -428,9 +440,10 @@ public class LedgerStreamTest
             "plainAppend" => Append(ledger, InviteKey, Bytes(0x02, 32)),
             "removeOtherKey" => Append(ledger, InviteKey, Bytes(0x02, 32), added: [SwappedKey], removed: [CreatorKey]),
             "addTwoKeys" => Append(ledger, InviteKey, Bytes(0x02, 32), added: [SwappedKey, OtherKey], removed: [InviteKey]),
-            "addInvite" => Append(ledger, InviteKey, Bytes(0x02, 32), added: [SwappedKey], removed: [InviteKey], invites: [OtherKey]),
+            "addInvite" => Append(ledger, InviteKey, Bytes(0x02, 32), added: [SwappedKey], removed: [InviteKey], invites: [Writer(OtherKey)]),
             "addExistingKey" => Append(ledger, InviteKey, Bytes(0x02, 32), added: [CreatorKey], removed: [InviteKey]),
             "removeSelfOnly" => Append(ledger, InviteKey, Bytes(0x02, 32), removed: [InviteKey]),
+            "changeRole" => Append(ledger, InviteKey, Bytes(0x02, 32), added: [SwappedKey], removed: [InviteKey], roles: [Owner(SwappedKey)]),
             _ => throw new ArgumentOutOfRangeException(nameof(violation)),
         };
 
@@ -457,6 +470,105 @@ public class LedgerStreamTest
         var ledger = LedgerWithInvite();
 
         var result = Append(ledger, CreatorKey, Bytes(0x02, 32), removed: [CreatorKey]);
+
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Validation);
+    }
+
+    [Theory]
+    [InlineData(WriteKeyRole.Writer, WriteKeyRole.Writer, true)]
+    [InlineData(WriteKeyRole.Writer, WriteKeyRole.Admin, false)]
+    [InlineData(WriteKeyRole.Admin, WriteKeyRole.Admin, true)]
+    [InlineData(WriteKeyRole.Admin, WriteKeyRole.Owner, false)]
+    [InlineData(WriteKeyRole.Owner, WriteKeyRole.Owner, true)]
+    public void Append_ShouldOnlyAllowInvites_UpToTheAuthorsRole(WriteKeyRole author, WriteKeyRole invite, bool allowed)
+    {
+        var ledger = LedgerWithMembers();
+        var authorKey = author switch
+        {
+            WriteKeyRole.Writer => OtherKey,
+            WriteKeyRole.Admin => AdminKey,
+            _ => CreatorKey,
+        };
+
+        var result = Append(ledger, authorKey, Bytes(0x20, 32), invites: [new KeyGrant(InviteKey, invite)]);
+
+        result.Success.Should().Be(allowed);
+        ledger.HasWriteKey(InviteKey).Should().Be(allowed);
+        if (!allowed)
+            result.Error!.Type.Should().Be(ErrorType.Forbidden);
+    }
+
+    public static TheoryData<string, string, bool> Removals => new()
+    {
+        { "writer", "writer", true },
+        { "writer", "otherWriter", false },
+        { "writer", "admin", false },
+        { "writer", "owner", false },
+        { "admin", "admin", true },
+        { "admin", "writer", true },
+        { "admin", "invite", true },
+        { "admin", "otherAdmin", false },
+        { "admin", "owner", false },
+        { "owner", "otherAdmin", true },
+        { "owner", "writer", true },
+        { "owner", "owner", true },
+    };
+
+    [Theory]
+    [MemberData(nameof(Removals))]
+    public void Append_ShouldOnlyAllowRemovals_ThatTheAuthorsRolePermits(string author, string target, bool allowed)
+    {
+        var ledger = LedgerWithMembers();
+        Append(ledger, CreatorKey, Bytes(0x20, 32), invites: [Writer(InviteKey)]);
+        byte[] KeyFor(string name) => name switch
+        {
+            "writer" => OtherKey,
+            "otherWriter" => SecondWriterKey,
+            "admin" => AdminKey,
+            "otherAdmin" => SecondAdminKey,
+            "invite" => InviteKey,
+            _ => CreatorKey,
+        };
+
+        var result = Append(ledger, KeyFor(author), Bytes(0x21, 32), removed: [KeyFor(target)]);
+
+        result.Success.Should().Be(allowed);
+        ledger.HasWriteKey(KeyFor(target)).Should().Be(!allowed);
+        if (!allowed)
+            result.Error!.Type.Should().Be(ErrorType.Forbidden);
+    }
+
+    [Fact]
+    public void Append_ShouldChangeRoles_WhenSignedByOwner()
+    {
+        var ledger = LedgerWithMembers();
+
+        var result = Append(ledger, CreatorKey, Bytes(0x20, 32), roles: [Admin(OtherKey), Writer(AdminKey)]);
+
+        result.Success.Should().BeTrue();
+        KeyOf(ledger, OtherKey).Role.Should().Be(WriteKeyRole.Admin);
+        KeyOf(ledger, AdminKey).Role.Should().Be(WriteKeyRole.Writer);
+    }
+
+    [Fact]
+    public void Append_ShouldRefuseRoleChanges_FromAdmin()
+    {
+        var ledger = LedgerWithMembers();
+
+        var result = Append(ledger, AdminKey, Bytes(0x20, 32), roles: [Admin(OtherKey)]);
+
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+        KeyOf(ledger, OtherKey).Role.Should().Be(WriteKeyRole.Writer);
+    }
+
+    [Fact]
+    public void Append_ShouldRefuseRoleChanges_ForKeysNotInTheLedger()
+    {
+        var ledger = LedgerWithMembers();
+
+        var result = Append(ledger, CreatorKey, Bytes(0x20, 32), roles: [Admin(UnknownKey)]);
 
         result.Success.Should().BeFalse();
         result.Error!.Type.Should().Be(ErrorType.Validation);

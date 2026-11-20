@@ -15,9 +15,10 @@ public sealed class CreateLedgerCommandValidator : AbstractValidator<CreateLedge
         RuleFor(x => x.Signature).Must(s => s.Length == 64);
         RuleFor(x => x.KeyChanges).NotNull();
         RuleFor(x => x.KeyChanges.InvitesAdded).NotNull().Must(k => k.Count >= MinInvitesAdded && k.Count <= LedgerQueryLimits.MaxKeysPerEvent);
-        RuleForEach(x => x.KeyChanges.InvitesAdded).Must(k => k.Length == 32);
+        RuleForEach(x => x.KeyChanges.InvitesAdded).Must(g => g.PublicKey.Length == 32 && Enum.IsDefined(g.Role));
         RuleFor(x => x.KeyChanges.Added).Empty();
         RuleFor(x => x.KeyChanges.Removed).Empty();
+        RuleFor(x => x.KeyChanges.RolesChanged).Empty();
     }
 }
 

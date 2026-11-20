@@ -55,8 +55,9 @@ internal sealed class SignatureHelper : ISignatureHelper
         input.Write(BigEndian(version));
         input.Write(previousHash);
         WriteKeys(input, keyChanges.Added);
-        WriteKeys(input, keyChanges.InvitesAdded);
+        WriteGrants(input, keyChanges.InvitesAdded);
         WriteKeys(input, keyChanges.Removed);
+        WriteGrants(input, keyChanges.RolesChanged);
         input.Write(payload);
 
         return input.ToArray();
@@ -96,6 +97,17 @@ internal sealed class SignatureHelper : ISignatureHelper
 
         foreach (var key in keys.OrderBy(Convert.ToHexString, StringComparer.Ordinal))
             input.Write(key);
+    }
+
+    private static void WriteGrants(Stream input, IReadOnlyCollection<KeyGrant> grants)
+    {
+        input.Write(BigEndian(grants.Count));
+
+        foreach (var grant in grants.OrderBy(g => Convert.ToHexString(g.PublicKey), StringComparer.Ordinal))
+        {
+            input.Write(grant.PublicKey);
+            input.WriteByte((byte)grant.Role);
+        }
     }
 
     private static byte[] BigEndian(int value)

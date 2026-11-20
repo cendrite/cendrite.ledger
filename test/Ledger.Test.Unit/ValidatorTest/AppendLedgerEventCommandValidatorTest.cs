@@ -2,6 +2,7 @@ using FluentAssertions;
 using Ledger.Application.Commands.Append;
 using Ledger.Application.Common;
 using Ledger.Domain.Common;
+using Ledger.Domain.Enums;
 
 namespace Ledger.Test.Unit.ValidatorTest;
 
@@ -13,7 +14,9 @@ public class AppendLedgerEventCommandValidatorTest
 
     private static List<byte[]> Keys(int count) => [.. Enumerable.Range(0, count).Select(i => Bytes((byte)i, 32))];
 
-    private static AppendLedgerEventCommand Command(int payloadBytes = 3, int keysAdded = 0, int keysRemoved = 0, int inviteKeysAdded = 0) => new()
+    private static List<KeyGrant> Grants(int count) => [.. Keys(count).Select(k => new KeyGrant(k, WriteKeyRole.Writer))];
+
+    private static AppendLedgerEventCommand Command(int payloadBytes = 3, int keysAdded = 0, int keysRemoved = 0, int inviteKeysAdded = 0, int rolesChanged = 0) => new()
     {
         LedgerId = Guid.NewGuid(),
         ExpectedVersion = 1,
@@ -21,7 +24,7 @@ public class AppendLedgerEventCommandValidatorTest
         Payload = Bytes(0x04, payloadBytes),
         WriteKeyPublic = Bytes(0x01, 32),
         Signature = Bytes(0x02, 64),
-        KeyChanges = new KeyChanges(Keys(keysAdded), Keys(inviteKeysAdded), Keys(keysRemoved)),
+        KeyChanges = new KeyChanges(Keys(keysAdded), Grants(inviteKeysAdded), Keys(keysRemoved), Grants(rolesChanged)),
     };
 
     [Fact]
@@ -102,7 +105,7 @@ public class AppendLedgerEventCommandValidatorTest
     public void Validate_Given_Malformed_Invite_Key_Should_Be_Invalid()
     {
         // Arrange
-        var command = Command() with { KeyChanges = new KeyChanges([], [Bytes(0x10, 31)], []) };
+        var command = Command() with { KeyChanges = new KeyChanges([], [new KeyGrant(Bytes(0x10, 31), WriteKeyRole.Writer)], [], []) };
 
         // Act
         var result = _sut.Validate(command);
@@ -110,5 +113,32 @@ public class AppendLedgerEventCommandValidatorTest
         // Assert
         result.IsValid.Should().BeFalse();
         result.Errors.Should().ContainSingle().Which.PropertyName.Should().StartWith("KeyChanges.InvitesAdded");
+    }
+
+    [Fact]
+    public void Validate_Given_Too_Many_Role_Changes_Should_Be_Invalid()
+    {
+        // Act
+        var result = _sut.Validate(Command(rolesChanged: LedgerQueryLimits.MaxKeysPerEvent + 1));
+
+        // Assert
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.PropertyName.Should().Be("KeyChanges.RolesChanged");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(4)]
+    public void Validate_Given_Undefined_Role_Should_Be_Invalid(int role)
+    {
+        // Arrange
+        var command = Command() with { KeyChanges = new KeyChanges([], [], [], [new KeyGrant(Bytes(0x10, 32), (WriteKeyRole)role)]) };
+
+        // Act
+        var result = _sut.Validate(command);
+
+        // Assert
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.PropertyName.Should().StartWith("KeyChanges.RolesChanged");
     }
 }

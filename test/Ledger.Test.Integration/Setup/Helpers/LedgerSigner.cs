@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using Ledger.Domain.Common;
 using NSec.Cryptography;
 
 namespace Ledger.Test.Integration.Setup.Helpers;
@@ -23,20 +24,16 @@ public static class LedgerSigner
         int version,
         byte[] previousHash,
         byte[] payload,
-        IReadOnlyCollection<byte[]>? keysAdded = null,
-        IReadOnlyCollection<byte[]>? keysRemoved = null,
-        IReadOnlyCollection<byte[]>? inviteKeysAdded = null) =>
-        Algorithm.Sign(key, SigningInput(ledgerId, version, previousHash, payload, keysAdded ?? [], inviteKeysAdded ?? [], keysRemoved ?? []));
+        KeyChanges? keyChanges = null) =>
+        Algorithm.Sign(key, SigningInput(ledgerId, version, previousHash, payload, keyChanges ?? KeyChanges.None));
 
     public static byte[] Hash(
         Guid ledgerId,
         int version,
         byte[] previousHash,
         byte[] payload,
-        IReadOnlyCollection<byte[]>? keysAdded = null,
-        IReadOnlyCollection<byte[]>? keysRemoved = null,
-        IReadOnlyCollection<byte[]>? inviteKeysAdded = null) =>
-        SHA256.HashData(SigningInput(ledgerId, version, previousHash, payload, keysAdded ?? [], inviteKeysAdded ?? [], keysRemoved ?? []));
+        KeyChanges? keyChanges = null) =>
+        SHA256.HashData(SigningInput(ledgerId, version, previousHash, payload, keyChanges ?? KeyChanges.None));
 
     public static long Now() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
@@ -58,21 +55,31 @@ public static class LedgerSigner
         int version,
         byte[] previousHash,
         byte[] payload,
-        IReadOnlyCollection<byte[]> keysAdded,
-        IReadOnlyCollection<byte[]> inviteKeysAdded,
-        IReadOnlyCollection<byte[]> keysRemoved)
+        KeyChanges keyChanges)
     {
         using var input = new MemoryStream();
         input.Write("ledger-v1"u8);
         input.Write(ledgerId.ToByteArray(bigEndian: true));
         input.Write(BigEndian(version));
         input.Write(previousHash);
-        WriteKeys(input, keysAdded);
-        WriteKeys(input, inviteKeysAdded);
-        WriteKeys(input, keysRemoved);
+        WriteKeys(input, keyChanges.Added);
+        WriteGrants(input, keyChanges.InvitesAdded);
+        WriteKeys(input, keyChanges.Removed);
+        WriteGrants(input, keyChanges.RolesChanged);
         input.Write(payload);
 
         return input.ToArray();
+    }
+
+    private static void WriteGrants(Stream input, IReadOnlyCollection<KeyGrant> grants)
+    {
+        input.Write(BigEndian(grants.Count));
+
+        foreach (var grant in grants.OrderBy(g => Convert.ToHexString(g.PublicKey), StringComparer.Ordinal))
+        {
+            input.Write(grant.PublicKey);
+            input.WriteByte((byte)grant.Role);
+        }
     }
 
     private static void WriteKeys(Stream input, IReadOnlyCollection<byte[]> keys)

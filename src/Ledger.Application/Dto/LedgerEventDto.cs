@@ -21,8 +21,9 @@ public sealed record LedgerEventDto
         KeyChanges = new KeyChangesDto
         {
             Added = evt.KeysAdded,
-            InvitesAdded = evt.InviteKeysAdded,
+            InvitesAdded = [.. evt.InvitesAdded.Select(g => new KeyGrantDto(g.PublicKey, g.Role))],
             Removed = evt.KeysRemoved,
+            RolesChanged = [.. evt.RolesChanged.Select(g => new KeyGrantDto(g.PublicKey, g.Role))],
         },
     };
 }

@@ -75,13 +75,6 @@ namespace Ledger.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted");
 
-                    b.PrimitiveCollection<List<byte[]>>("InviteKeysAdded")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bytea[]")
-                        .HasColumnName("invite_keys_added")
-                        .HasDefaultValueSql("'{}'::bytea[]");
-
                     b.PrimitiveCollection<List<byte[]>>("KeysAdded")
                         .IsRequired()
                         .HasColumnType("bytea[]")
@@ -127,6 +120,34 @@ namespace Ledger.Infrastructure.Persistence.Migrations
                         .HasColumnType("bytea")
                         .HasColumnName("write_key_public");
 
+                    b.ComplexCollection(typeof(List<Dictionary<string, object>>), "InvitesAdded", "Ledger.Domain.Entities.LedgerEvent.InvitesAdded#KeyGrant", b1 =>
+                        {
+                            b1.IsRequired();
+
+                            b1.Property<byte[]>("PublicKey")
+                                .IsRequired();
+
+                            b1.Property<int>("Role");
+
+                            b1
+                                .ToJson("invites_added")
+                                .HasColumnType("jsonb");
+                        });
+
+                    b.ComplexCollection(typeof(List<Dictionary<string, object>>), "RolesChanged", "Ledger.Domain.Entities.LedgerEvent.RolesChanged#KeyGrant", b1 =>
+                        {
+                            b1.IsRequired();
+
+                            b1.Property<byte[]>("PublicKey")
+                                .IsRequired();
+
+                            b1.Property<int>("Role");
+
+                            b1
+                                .ToJson("roles_changed")
+                                .HasColumnType("jsonb");
+                        });
+
                     b.HasKey("Id");
 
                     b.HasIndex("StreamId", "Version")
@@ -148,6 +169,10 @@ namespace Ledger.Infrastructure.Persistence.Migrations
                     b.Property<DateTime?>("Deleted")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted");
+
+                    b.Property<bool>("IsInvite")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_invite");
 
                     b.Property<byte[]>("PublicKey")
                         .IsRequired()

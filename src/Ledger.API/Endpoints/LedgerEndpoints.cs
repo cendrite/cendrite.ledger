@@ -32,7 +32,11 @@ internal sealed class LedgerEndpoints : IEndpoint
                 Payload = req.Payload,
                 WriteKey = req.WriteKey,
                 Signature = req.Signature,
-                KeyChanges = new KeyChanges(req.KeyChanges.Added, req.KeyChanges.InvitesAdded, req.KeyChanges.Removed)
+                KeyChanges = new KeyChanges(
+                    req.KeyChanges.Added,
+                    [.. req.KeyChanges.InvitesAdded.Select(g => new KeyGrant(g.PublicKey, g.Role))],
+                    req.KeyChanges.Removed,
+                    [.. req.KeyChanges.RolesChanged.Select(g => new KeyGrant(g.PublicKey, g.Role))])
             }, ct);
 
             return result.Success ? Results.Created($"/api/ledger/streams/{req.LedgerId}", null) : result.ToProblemDetails();
@@ -51,7 +55,11 @@ internal sealed class LedgerEndpoints : IEndpoint
                 Payload = req.Payload,
                 WriteKeyPublic = req.WriteKeyPublic,
                 Signature = req.Signature,
-                KeyChanges = new KeyChanges(req.KeyChanges.Added, req.KeyChanges.InvitesAdded, req.KeyChanges.Removed)
+                KeyChanges = new KeyChanges(
+                    req.KeyChanges.Added,
+                    [.. req.KeyChanges.InvitesAdded.Select(g => new KeyGrant(g.PublicKey, g.Role))],
+                    req.KeyChanges.Removed,
+                    [.. req.KeyChanges.RolesChanged.Select(g => new KeyGrant(g.PublicKey, g.Role))])
             }, ct);
 
             return result.Success ? Results.Ok() : result.ToProblemDetails();

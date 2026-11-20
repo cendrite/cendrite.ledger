@@ -48,14 +48,13 @@ public sealed class LedgerEventModelConfiguration : BaseModelConfiguration<Ledge
             .HasColumnName("keys_added")
             .IsRequired();
 
-        builder.Property(x => x.InviteKeysAdded)
-            .HasColumnName("invite_keys_added")
-            .HasDefaultValueSql("'{}'::bytea[]")
-            .IsRequired();
+        builder.ComplexCollection(x => x.InvitesAdded, grant => grant.ToJson("invites_added"));
 
         builder.Property(x => x.KeysRemoved)
             .HasColumnName("keys_removed")
             .IsRequired();
+
+        builder.ComplexCollection(x => x.RolesChanged, grant => grant.ToJson("roles_changed"));
 
         builder.HasIndex(x => new { x.StreamId, x.Version })
             .IsUnique();

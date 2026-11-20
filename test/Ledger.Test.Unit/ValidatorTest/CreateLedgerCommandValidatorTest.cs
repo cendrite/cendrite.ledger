@@ -2,6 +2,7 @@ using FluentAssertions;
 using Ledger.Application.Commands.Create;
 using Ledger.Application.Common;
 using Ledger.Domain.Common;
+using Ledger.Domain.Enums;
 
 namespace Ledger.Test.Unit.ValidatorTest;
 
@@ -11,13 +12,15 @@ public class CreateLedgerCommandValidatorTest
 
     private static byte[] Bytes(byte value, int length) => [.. Enumerable.Repeat(value, length)];
 
+    private static KeyGrant Writer(byte[] key) => new(key, WriteKeyRole.Writer);
+
     private static CreateLedgerCommand Command(int keysAdded) => new()
     {
         LedgerId = Guid.NewGuid(),
         Payload = [1, 2, 3],
         WriteKey = Bytes(0x01, 32),
         Signature = Bytes(0x02, 64),
-        KeyChanges = new KeyChanges([], [.. Enumerable.Range(0, keysAdded).Select(i => Bytes((byte)(0x10 + i), 32))], []),
+        KeyChanges = new KeyChanges([], [.. Enumerable.Range(0, keysAdded).Select(i => Writer(Bytes((byte)(0x10 + i), 32)))], [], []),
     };
 
     [Theory]
@@ -47,7 +50,7 @@ public class CreateLedgerCommandValidatorTest
     public void Validate_Given_Malformed_Key_Added_Should_Be_Invalid()
     {
         // Arrange
-        var command = Command(3) with { KeyChanges = new KeyChanges([], [Bytes(0x10, 32), Bytes(0x11, 32), Bytes(0x12, 31)], []) };
+        var command = Command(3) with { KeyChanges = new KeyChanges([], [Writer(Bytes(0x10, 32)), Writer(Bytes(0x11, 32)), Writer(Bytes(0x12, 31))], [], []) };
 
         // Act
         var result = _sut.Validate(command);
@@ -108,5 +111,19 @@ public class CreateLedgerCommandValidatorTest
         // Assert
         result.IsValid.Should().BeFalse();
         result.Errors.Should().ContainSingle().Which.PropertyName.Should().Be("KeyChanges.Removed");
+    }
+
+    [Fact]
+    public void Validate_Given_Roles_Changed_Should_Be_Invalid()
+    {
+        // Arrange
+        var command = Command(2) with { KeyChanges = Command(2).KeyChanges with { RolesChanged = [Writer(Bytes(0x20, 32))] } };
+
+        // Act
+        var result = _sut.Validate(command);
+
+        // Assert
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().ContainSingle().Which.PropertyName.Should().Be("KeyChanges.RolesChanged");
     }
 }

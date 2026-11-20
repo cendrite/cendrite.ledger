@@ -7,6 +7,7 @@ using Ledger.Application.Interfaces;
 using Ledger.Application.Queries.GetEvents;
 using Ledger.Domain.Aggregates;
 using Ledger.Domain.Common;
+using Ledger.Domain.Enums;
 using Ledger.Infrastructure.Persistence.Context;
 using Ledger.Test.Integration.Setup;
 using Ledger.Test.Integration.Setup.Helpers;
@@ -50,9 +51,9 @@ public class GetLedgerEventsQueryHandlerTest : IntegrationTestBase
         };
     }
 
-    private async Task<LedgerStream> AppendAsync(LedgerStream ledger, byte[] payload, List<byte[]>? keysAdded = null)
+    private async Task<LedgerStream> AppendAsync(LedgerStream ledger, byte[] payload, List<KeyGrant>? invitesAdded = null)
     {
-        var command = (LedgerCommands.Append(ledger, payload) with { KeyChanges = new KeyChanges(keysAdded ?? [], [], []) }).SignedBy(_creator);
+        var command = (LedgerCommands.Append(ledger, payload) with { KeyChanges = new KeyChanges([], invitesAdded ?? [], [], []) }).SignedBy(_creator);
         var result = await _append.Handle(command, CancellationToken.None);
         result.Success.Should().BeTrue();
 
@@ -95,20 +96,24 @@ public class GetLedgerEventsQueryHandlerTest : IntegrationTestBase
     {
         // Arrange
         var ledger = await LedgerFactory.SeedAsync(Db, _creator);
-        var newMember = LedgerSigner.PublicKeyOf(LedgerSigner.NewKey());
-        await AppendAsync(ledger, [4, 5, 6], keysAdded: [newMember]);
+        var invite = new KeyGrant(LedgerSigner.PublicKeyOf(LedgerSigner.NewKey()), WriteKeyRole.Admin);
+        await AppendAsync(ledger, [4, 5, 6], invitesAdded: [invite]);
 
         // Act
         var result = await _sut.Handle(Query(ledger.Id), CancellationToken.None);
 
         // Assert
         var granted = result.RequiredValue.Events.Single(e => e.Version == 2);
-        granted.KeyChanges.Added.Should().ContainSingle().Which.Should().Equal(newMember);
+        var grant = granted.KeyChanges.InvitesAdded.Should().ContainSingle().Subject;
+        grant.PublicKey.Should().Equal(invite.PublicKey);
+        grant.Role.Should().Be(WriteKeyRole.Admin);
+        granted.KeyChanges.Added.Should().BeEmpty();
         granted.KeyChanges.Removed.Should().BeEmpty();
+        granted.KeyChanges.RolesChanged.Should().BeEmpty();
         granted.PreviousHash.Should().Equal(ledger.Hash);
         granted.WriteKeyPublic.Should().Equal(LedgerSigner.PublicKeyOf(_creator));
         granted.Signature.Should().Equal(
-            LedgerSigner.Sign(_creator, ledger.Id, 2, ledger.Hash, [4, 5, 6], [newMember], []));
+            LedgerSigner.Sign(_creator, ledger.Id, 2, ledger.Hash, [4, 5, 6], new KeyChanges([], [invite], [], [])));
     }
 
     [Fact]
@@ -244,9 +249,9 @@ public class GetLedgerEventsQueryHandlerTest : IntegrationTestBase
         // Arrange
         var member = LedgerSigner.NewKey();
         var ledger = await LedgerFactory.SeedAsync(Db, _creator);
-        ledger = await AppendAsync(ledger, [4, 5, 6], [LedgerSigner.PublicKeyOf(member)]);
+        ledger = await AppendAsync(ledger, [4, 5, 6], [new KeyGrant(LedgerSigner.PublicKeyOf(member), WriteKeyRole.Writer)]);
 
-        var removal = (LedgerCommands.Append(ledger, [7, 8, 9]) with { KeyChanges = new KeyChanges([], [], [LedgerSigner.PublicKeyOf(member)]) }).SignedBy(_creator);
+        var removal = (LedgerCommands.Append(ledger, [7, 8, 9]) with { KeyChanges = new KeyChanges([], [], [LedgerSigner.PublicKeyOf(member)], []) }).SignedBy(_creator);
         (await _append.Handle(removal, CancellationToken.None)).Success.Should().BeTrue();
 
         // Act
@@ -265,7 +270,7 @@ public class GetLedgerEventsQueryHandlerTest : IntegrationTestBase
     {
         // Arrange
         var invite = LedgerSigner.NewKey();
-        var ledger = await LedgerFactory.SeedAsync(Db, _creator, inviteKeys: [LedgerSigner.PublicKeyOf(invite)]);
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator, inviteKeys: [new KeyGrant(LedgerSigner.PublicKeyOf(invite), WriteKeyRole.Writer)]);
 
         // Act
         var result = await _sut.Handle(Query(ledger.Id, reader: invite), CancellationToken.None);
@@ -273,7 +278,9 @@ public class GetLedgerEventsQueryHandlerTest : IntegrationTestBase
         // Assert
         result.Success.Should().BeTrue();
         var genesis = result.RequiredValue.Events.Single();
-        genesis.KeyChanges.InvitesAdded.Should().ContainSingle().Which.Should().Equal(LedgerSigner.PublicKeyOf(invite));
+        var grant = genesis.KeyChanges.InvitesAdded.Should().ContainSingle().Subject;
+        grant.PublicKey.Should().Equal(LedgerSigner.PublicKeyOf(invite));
+        grant.Role.Should().Be(WriteKeyRole.Writer);
         genesis.KeyChanges.Added.Should().BeEmpty();
     }
 }

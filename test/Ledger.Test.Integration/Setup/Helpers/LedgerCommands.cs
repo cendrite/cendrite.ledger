@@ -3,6 +3,7 @@ using Ledger.Application.Commands.Archive;
 using Ledger.Application.Commands.Create;
 using Ledger.Domain.Aggregates;
 using Ledger.Domain.Common;
+using Ledger.Domain.Enums;
 using NSec.Cryptography;
 
 namespace Ledger.Test.Integration.Setup.Helpers;
@@ -15,7 +16,7 @@ public static class LedgerCommands
         Payload = payload ?? [1, 2, 3],
         WriteKey = [],
         Signature = [],
-        KeyChanges = new KeyChanges([], [.. Enumerable.Range(0, 3).Select(_ => LedgerSigner.PublicKeyOf(LedgerSigner.NewKey()))], []),
+        KeyChanges = new KeyChanges([], [.. Enumerable.Range(0, 3).Select(_ => new KeyGrant(LedgerSigner.PublicKeyOf(LedgerSigner.NewKey()), WriteKeyRole.Writer))], [], []),
     };
 
     public static AppendLedgerEventCommand Append(LedgerStream ledger, byte[]? payload = null) => new()
@@ -48,12 +49,12 @@ public static class LedgerCommands
     public static CreateLedgerCommand SignedBy(this CreateLedgerCommand cmd, Key key) => cmd with
     {
         WriteKey = LedgerSigner.PublicKeyOf(key),
-        Signature = LedgerSigner.Sign(key, cmd.LedgerId, LedgerFactory.GenesisVersion, LedgerFactory.GenesisHash, cmd.Payload, inviteKeysAdded: cmd.KeyChanges.InvitesAdded),
+        Signature = LedgerSigner.Sign(key, cmd.LedgerId, LedgerFactory.GenesisVersion, LedgerFactory.GenesisHash, cmd.Payload, cmd.KeyChanges),
     };
 
     public static AppendLedgerEventCommand SignedBy(this AppendLedgerEventCommand cmd, Key key) => cmd with
     {
         WriteKeyPublic = LedgerSigner.PublicKeyOf(key),
-        Signature = LedgerSigner.Sign(key, cmd.LedgerId, cmd.ExpectedVersion + 1, cmd.PreviousHash, cmd.Payload, cmd.KeyChanges.Added, cmd.KeyChanges.Removed, cmd.KeyChanges.InvitesAdded),
+        Signature = LedgerSigner.Sign(key, cmd.LedgerId, cmd.ExpectedVersion + 1, cmd.PreviousHash, cmd.Payload, cmd.KeyChanges),
     };
 }
