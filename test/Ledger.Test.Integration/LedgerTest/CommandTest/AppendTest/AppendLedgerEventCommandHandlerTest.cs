@@ -2,6 +2,7 @@ using FluentAssertions;
 using Ledger.Application.Abstractions;
 using Ledger.Application.Commands.Append;
 using Ledger.Application.Interfaces;
+using Ledger.Domain.Aggregates;
 using Ledger.Domain.Common;
 using Ledger.Domain.Enums;
 using Ledger.Infrastructure.Persistence.Context;
@@ -136,91 +137,195 @@ public class AppendLedgerEventCommandHandlerTest : IntegrationTestBase
         Db.LedgerEvent.AsNoTracking().Where(e => e.StreamId == ledger.Id).Should().ContainSingle();
     }
 
-    [Fact]
-    public async Task Handle_Given_Key_Added_Should_Let_That_Key_Append_Next()
+    private static KeyGrant Grant(Key key, WriteKeyRole role) => new(LedgerSigner.PublicKeyOf(key), role);
+
+    private async Task<LedgerStream> JoinAsync(LedgerStream ledger, Key member, WriteKeyRole role)
     {
-        // Arrange
-        var ledger = await LedgerFactory.SeedAsync(Db, _creator);
-        var newMember = LedgerSigner.NewKey();
+        var invite = LedgerSigner.NewKey();
 
-        var grantCommand = (LedgerCommands.Append(ledger) with
+        var granted = await _sut.Handle((LedgerCommands.Append(ledger) with
         {
-            KeyChanges = new KeyChanges([LedgerSigner.PublicKeyOf(newMember)], [], []),
-        }).SignedBy(_creator);
+            KeyChanges = new KeyChanges([], [Grant(invite, role)], [], []),
+        }).SignedBy(_creator), CancellationToken.None);
+        granted.Success.Should().BeTrue();
 
-        // Act
-        var grant = await _sut.Handle(grantCommand, CancellationToken.None);
+        var afterInvite = await LedgerFactory.ReloadAsync(Db, ledger.Id);
+        var swapped = await _sut.Handle((LedgerCommands.Append(afterInvite) with
+        {
+            KeyChanges = new KeyChanges([LedgerSigner.PublicKeyOf(member)], [], [LedgerSigner.PublicKeyOf(invite)], []),
+        }).SignedBy(invite), CancellationToken.None);
+        swapped.Success.Should().BeTrue();
 
-        var afterGrant = await LedgerFactory.ReloadAsync(Db, ledger.Id);
-        var second = await _sut.Handle(LedgerCommands.Append(afterGrant, [7, 7, 7]).SignedBy(newMember), CancellationToken.None);
-
-        // Assert
-        grant.Success.Should().BeTrue();
-        second.Success.Should().BeTrue();
-        afterGrant.WriteKeys.Should().HaveCount(2);
-        Db.LedgerEvent.AsNoTracking().Where(e => e.StreamId == ledger.Id).Should().HaveCount(3);
+        return await LedgerFactory.ReloadAsync(Db, ledger.Id);
     }
 
     [Fact]
-    public async Task Handle_Given_Key_Mutations_Should_Persist_Them_On_The_Event()
+    public async Task Handle_Given_Write_Key_Adding_A_Key_Directly_Should_Return_Forbidden()
     {
         // Arrange
         var ledger = await LedgerFactory.SeedAsync(Db, _creator);
-        var newMember = LedgerSigner.PublicKeyOf(LedgerSigner.NewKey());
-
-        var command = (LedgerCommands.Append(ledger) with { KeyChanges = new KeyChanges([newMember], [], []) }).SignedBy(_creator);
+        var command = (LedgerCommands.Append(ledger) with
+        {
+            KeyChanges = new KeyChanges([LedgerSigner.PublicKeyOf(LedgerSigner.NewKey())], [], [], []),
+        }).SignedBy(_creator);
 
         // Act
         var result = await _sut.Handle(command, CancellationToken.None);
 
         // Assert
-        result.Success.Should().BeTrue();
-
-        var stored = await Db.LedgerEvent.AsNoTracking().SingleAsync(e => e.StreamId == ledger.Id && e.Version == 2);
-        stored.KeysAdded.Should().ContainSingle().Which.Should().Equal(newMember);
-        stored.KeysRemoved.Should().BeEmpty();
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+        Db.LedgerEvent.AsNoTracking().Where(e => e.StreamId == ledger.Id).Should().ContainSingle();
     }
 
     [Fact]
     public async Task Handle_Given_Key_Removed_Should_Reject_That_Key_Afterwards()
     {
         // Arrange
-        var ledger = await LedgerFactory.SeedAsync(Db, _creator);
-        var newMember = LedgerSigner.NewKey();
-
-        await _sut.Handle((LedgerCommands.Append(ledger) with
-        {
-            KeyChanges = new KeyChanges([LedgerSigner.PublicKeyOf(newMember)], [], []),
-        }).SignedBy(_creator), CancellationToken.None);
-
-        var afterGrant = await LedgerFactory.ReloadAsync(Db, ledger.Id);
+        var member = LedgerSigner.NewKey();
+        var ledger = await JoinAsync(await LedgerFactory.SeedAsync(Db, _creator), member, WriteKeyRole.Writer);
 
         // Act
-        await _sut.Handle((LedgerCommands.Append(afterGrant, [8, 8, 8]) with
+        var removed = await _sut.Handle((LedgerCommands.Append(ledger, [8, 8, 8]) with
         {
-            KeyChanges = new KeyChanges([], [], [LedgerSigner.PublicKeyOf(newMember)]),
+            KeyChanges = new KeyChanges([], [], [LedgerSigner.PublicKeyOf(member)], []),
         }).SignedBy(_creator), CancellationToken.None);
 
         var afterRevoke = await LedgerFactory.ReloadAsync(Db, ledger.Id);
-        var result = await _sut.Handle(LedgerCommands.Append(afterRevoke, [9, 9, 9]).SignedBy(newMember), CancellationToken.None);
+        var result = await _sut.Handle(LedgerCommands.Append(afterRevoke, [9, 9, 9]).SignedBy(member), CancellationToken.None);
 
         // Assert
+        removed.Success.Should().BeTrue();
         afterRevoke.WriteKeys.Should().ContainSingle();
         result.Success.Should().BeFalse();
         result.Error!.Type.Should().Be(ErrorType.Forbidden);
     }
 
     [Fact]
-    public async Task Handle_Given_Invite_Self_Swap_Should_Replace_The_Invite_With_A_Writer_Key()
+    public async Task Handle_Given_Writer_Removing_Another_Key_Should_Return_Forbidden()
+    {
+        // Arrange
+        var writer = LedgerSigner.NewKey();
+        var other = LedgerSigner.NewKey();
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator);
+        ledger = await JoinAsync(ledger, writer, WriteKeyRole.Writer);
+        ledger = await JoinAsync(ledger, other, WriteKeyRole.Writer);
+
+        var command = (LedgerCommands.Append(ledger) with
+        {
+            KeyChanges = new KeyChanges([], [], [LedgerSigner.PublicKeyOf(other), LedgerSigner.PublicKeyOf(_creator)], []),
+        }).SignedBy(writer);
+
+        // Act
+        var result = await _sut.Handle(command, CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+        var stored = await LedgerFactory.ReloadAsync(Db, ledger.Id);
+        stored.WriteKeys.Should().HaveCount(3);
+    }
+
+    [Fact]
+    public async Task Handle_Given_Writer_Removing_Its_Own_Key_Should_Succeed()
+    {
+        // Arrange
+        var writer = LedgerSigner.NewKey();
+        var ledger = await JoinAsync(await LedgerFactory.SeedAsync(Db, _creator), writer, WriteKeyRole.Writer);
+
+        var command = (LedgerCommands.Append(ledger) with
+        {
+            KeyChanges = new KeyChanges([], [], [LedgerSigner.PublicKeyOf(writer)], []),
+        }).SignedBy(writer);
+
+        // Act
+        var result = await _sut.Handle(command, CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeTrue();
+        var stored = await LedgerFactory.ReloadAsync(Db, ledger.Id);
+        stored.HasWriteKey(LedgerSigner.PublicKeyOf(writer)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Handle_Given_Owner_Role_Change_Should_Persist_It()
+    {
+        // Arrange
+        var member = LedgerSigner.NewKey();
+        var ledger = await JoinAsync(await LedgerFactory.SeedAsync(Db, _creator), member, WriteKeyRole.Writer);
+
+        var command = (LedgerCommands.Append(ledger) with
+        {
+            KeyChanges = new KeyChanges([], [], [], [Grant(member, WriteKeyRole.Admin)]),
+        }).SignedBy(_creator);
+
+        // Act
+        var result = await _sut.Handle(command, CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeTrue();
+        var evt = await Db.LedgerEvent.AsNoTracking().SingleAsync(e => e.StreamId == ledger.Id && e.Version == command.ExpectedVersion + 1);
+        var change = evt.RolesChanged.Should().ContainSingle().Subject;
+        change.PublicKey.Should().Equal(LedgerSigner.PublicKeyOf(member));
+        change.Role.Should().Be(WriteKeyRole.Admin);
+        var stored = await LedgerFactory.ReloadAsync(Db, ledger.Id);
+        stored.WriteKeys.Single(k => k.PublicKey.SequenceEqual(LedgerSigner.PublicKeyOf(member))).Role.Should().Be(WriteKeyRole.Admin);
+    }
+
+    [Fact]
+    public async Task Handle_Given_Admin_Role_Change_Should_Return_Forbidden()
+    {
+        // Arrange
+        var admin = LedgerSigner.NewKey();
+        var member = LedgerSigner.NewKey();
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator);
+        ledger = await JoinAsync(ledger, admin, WriteKeyRole.Admin);
+        ledger = await JoinAsync(ledger, member, WriteKeyRole.Writer);
+
+        var command = (LedgerCommands.Append(ledger) with
+        {
+            KeyChanges = new KeyChanges([], [], [], [Grant(member, WriteKeyRole.Admin)]),
+        }).SignedBy(admin);
+
+        // Act
+        var result = await _sut.Handle(command, CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+    }
+
+    [Fact]
+    public async Task Handle_Given_Invite_Above_The_Authors_Role_Should_Return_Forbidden()
+    {
+        // Arrange
+        var writer = LedgerSigner.NewKey();
+        var ledger = await JoinAsync(await LedgerFactory.SeedAsync(Db, _creator), writer, WriteKeyRole.Writer);
+
+        var command = (LedgerCommands.Append(ledger) with
+        {
+            KeyChanges = new KeyChanges([], [Grant(LedgerSigner.NewKey(), WriteKeyRole.Admin)], [], []),
+        }).SignedBy(writer);
+
+        // Act
+        var result = await _sut.Handle(command, CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+    }
+
+    [Fact]
+    public async Task Handle_Given_Invite_Self_Swap_Should_Replace_The_Invite_With_A_Key_Of_Its_Role()
     {
         // Arrange
         var invite = LedgerSigner.NewKey();
         var own = LedgerSigner.PublicKeyOf(LedgerSigner.NewKey());
-        var ledger = await LedgerFactory.SeedAsync(Db, _creator, inviteKeys: [LedgerSigner.PublicKeyOf(invite)]);
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator, inviteKeys: [Grant(invite, WriteKeyRole.Admin)]);
 
         var swap = (LedgerCommands.Append(ledger) with
         {
-            KeyChanges = new KeyChanges([own], [], [LedgerSigner.PublicKeyOf(invite)]),
+            KeyChanges = new KeyChanges([own], [], [LedgerSigner.PublicKeyOf(invite)], []),
         }).SignedBy(invite);
 
         // Act
@@ -231,7 +336,9 @@ public class AppendLedgerEventCommandHandlerTest : IntegrationTestBase
 
         var stored = await LedgerFactory.ReloadAsync(Db, ledger.Id);
         stored.HasWriteKey(LedgerSigner.PublicKeyOf(invite)).Should().BeFalse();
-        stored.WriteKeys.Single(k => k.PublicKey.SequenceEqual(own)).Role.Should().Be(WriteKeyRole.Writer);
+        var key = stored.WriteKeys.Single(k => k.PublicKey.SequenceEqual(own));
+        key.Role.Should().Be(WriteKeyRole.Admin);
+        key.IsInvite.Should().BeFalse();
     }
 
     [Fact]
@@ -239,7 +346,7 @@ public class AppendLedgerEventCommandHandlerTest : IntegrationTestBase
     {
         // Arrange
         var invite = LedgerSigner.NewKey();
-        var ledger = await LedgerFactory.SeedAsync(Db, _creator, inviteKeys: [LedgerSigner.PublicKeyOf(invite)]);
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator, inviteKeys: [Grant(invite, WriteKeyRole.Writer)]);
 
         // Act
         var result = await _sut.Handle(LedgerCommands.Append(ledger).SignedBy(invite), CancellationToken.None);
@@ -256,7 +363,8 @@ public class AppendLedgerEventCommandHandlerTest : IntegrationTestBase
         // Arrange
         var ledger = await LedgerFactory.SeedAsync(Db, _creator);
         var invite = LedgerSigner.PublicKeyOf(LedgerSigner.NewKey());
-        var command = (LedgerCommands.Append(ledger) with { KeyChanges = new KeyChanges([], [invite], []) }).SignedBy(_creator);
+        var grant = new KeyGrant(invite, WriteKeyRole.Writer);
+        var command = (LedgerCommands.Append(ledger) with { KeyChanges = new KeyChanges([], [grant], [], []) }).SignedBy(_creator);
 
         // Act
         var result = await _sut.Handle(command, CancellationToken.None);
@@ -265,12 +373,16 @@ public class AppendLedgerEventCommandHandlerTest : IntegrationTestBase
         result.Success.Should().BeTrue();
 
         var stored = await Db.LedgerEvent.AsNoTracking().SingleAsync(e => e.StreamId == ledger.Id && e.Version == 2);
-        stored.InviteKeysAdded.Should().ContainSingle().Which.Should().Equal(invite);
+        var storedInvite = stored.InvitesAdded.Should().ContainSingle().Subject;
+        storedInvite.PublicKey.Should().Equal(invite);
+        storedInvite.Role.Should().Be(WriteKeyRole.Writer);
         stored.KeysAdded.Should().BeEmpty();
 
         var reloaded = await LedgerFactory.ReloadAsync(Db, ledger.Id);
-        reloaded.WriteKeys.Single(k => k.PublicKey.SequenceEqual(invite)).Role.Should().Be(WriteKeyRole.Invite);
-        reloaded.Hash.Should().Equal(LedgerSigner.Hash(ledger.Id, 2, ledger.Hash, command.Payload, inviteKeysAdded: [invite]));
+        var key = reloaded.WriteKeys.Single(k => k.PublicKey.SequenceEqual(invite));
+        key.IsInvite.Should().BeTrue();
+        key.Role.Should().Be(WriteKeyRole.Writer);
+        reloaded.Hash.Should().Equal(LedgerSigner.Hash(ledger.Id, 2, ledger.Hash, command.Payload, command.KeyChanges));
     }
 
     [Fact]
@@ -280,13 +392,13 @@ public class AppendLedgerEventCommandHandlerTest : IntegrationTestBase
         var ledger = await LedgerFactory.SeedAsync(Db, _creator);
         var signed = (LedgerCommands.Append(ledger) with
         {
-            KeyChanges = new KeyChanges([], [LedgerSigner.PublicKeyOf(LedgerSigner.NewKey())], []),
+            KeyChanges = new KeyChanges([], [Grant(LedgerSigner.NewKey(), WriteKeyRole.Writer)], [], []),
         }).SignedBy(_creator);
         var tampered = signed with
         {
             KeyChanges = signed.KeyChanges with
             {
-                InvitesAdded = [.. signed.KeyChanges.InvitesAdded, LedgerSigner.PublicKeyOf(LedgerSigner.NewKey())],
+                InvitesAdded = [.. signed.KeyChanges.InvitesAdded, Grant(LedgerSigner.NewKey(), WriteKeyRole.Writer)],
             },
         };
 

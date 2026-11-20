@@ -48,9 +48,9 @@ public class CreateLedgerCommandHandlerTest : IntegrationTestBase
 
         stored.Version.Should().Be(LedgerFactory.GenesisVersion);
         stored.Archived.Should().BeFalse();
-        stored.Hash.Should().Equal(LedgerSigner.Hash(ledgerId, LedgerFactory.GenesisVersion, LedgerFactory.GenesisHash, command.Payload, inviteKeysAdded: command.KeyChanges.InvitesAdded));
+        stored.Hash.Should().Equal(LedgerSigner.Hash(ledgerId, LedgerFactory.GenesisVersion, LedgerFactory.GenesisHash, command.Payload, command.KeyChanges));
         stored.WriteKeys.Select(k => k.PublicKey).Should().BeEquivalentTo(
-            command.KeyChanges.InvitesAdded.Prepend(LedgerSigner.PublicKeyOf(_creator)));
+            command.KeyChanges.InvitesAdded.Select(g => g.PublicKey).Prepend(LedgerSigner.PublicKeyOf(_creator)));
 
         var evt = stored.Events.Should().ContainSingle().Subject;
         evt.Version.Should().Be(LedgerFactory.GenesisVersion);
@@ -58,10 +58,10 @@ public class CreateLedgerCommandHandlerTest : IntegrationTestBase
         evt.PreviousHash.Should().Equal(LedgerFactory.GenesisHash);
         evt.WriteKeyPublic.Should().Equal(LedgerSigner.PublicKeyOf(_creator));
         evt.KeysAdded.Should().BeEmpty();
-        evt.InviteKeysAdded.Should().BeEquivalentTo(command.KeyChanges.InvitesAdded);
+        evt.InvitesAdded.Should().BeEquivalentTo(command.KeyChanges.InvitesAdded);
         stored.WriteKeys.Single(k => k.PublicKey.SequenceEqual(LedgerSigner.PublicKeyOf(_creator))).Role.Should().Be(WriteKeyRole.Owner);
         stored.WriteKeys.Where(k => !k.PublicKey.SequenceEqual(LedgerSigner.PublicKeyOf(_creator)))
-            .Should().OnlyContain(k => k.Role == WriteKeyRole.Invite);
+            .Should().OnlyContain(k => k.IsInvite && k.Role == WriteKeyRole.Writer);
     }
 
     [Fact]
@@ -103,7 +103,7 @@ public class CreateLedgerCommandHandlerTest : IntegrationTestBase
         // Arrange
         var command = LedgerCommands.Create(Guid.NewGuid()).SignedBy(_creator) with
         {
-            KeyChanges = new KeyChanges([], [LedgerSigner.PublicKeyOf(LedgerSigner.NewKey())], []),
+            KeyChanges = new KeyChanges([], [new KeyGrant(LedgerSigner.PublicKeyOf(LedgerSigner.NewKey()), WriteKeyRole.Writer)], [], []),
         };
 
         // Act

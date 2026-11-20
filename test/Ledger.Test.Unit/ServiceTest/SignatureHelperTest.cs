@@ -4,6 +4,7 @@ using FluentAssertions;
 using Ledger.Application.Common;
 using Ledger.Application.Services;
 using Ledger.Domain.Common;
+using Ledger.Domain.Enums;
 using NSec.Cryptography;
 
 namespace Ledger.Test.Unit.ServiceTest;
@@ -24,12 +25,14 @@ public class SignatureHelperTest
 
     private static byte[] Bytes(byte value, int length) => [.. Enumerable.Repeat(value, length)];
 
-    private byte[] Sign(Key key, byte[]? payload = null, int version = 1, byte[][]? added = null, byte[][]? invites = null, byte[][]? removed = null) =>
-        Ed25519.Sign(key, ExpectedSigningInput(_ledgerId, version, _previousHash, payload ?? _payload, added ?? [], invites ?? [], removed ?? []));
+    private static KeyGrant[] Writers(params byte[][] keys) => [.. keys.Select(k => new KeyGrant(k, WriteKeyRole.Writer))];
+
+    private byte[] Sign(Key key, byte[]? payload = null, int version = 1, byte[][]? added = null, KeyGrant[]? invites = null, byte[][]? removed = null, KeyGrant[]? roles = null) =>
+        Ed25519.Sign(key, ExpectedSigningInput(_ledgerId, version, _previousHash, payload ?? _payload, added ?? [], invites ?? [], removed ?? [], roles ?? []));
 
     // Built independently of the implementation: if the layout changes, these tests fail instead of following along.
     private static byte[] ExpectedSigningInput(
-        Guid ledgerId, int version, byte[] previousHash, byte[] payload, byte[][] added, byte[][] invites, byte[][] removed)
+        Guid ledgerId, int version, byte[] previousHash, byte[] payload, byte[][] added, KeyGrant[] invites, byte[][] removed, KeyGrant[] roles)
     {
         var versionBytes = new byte[4];
         BinaryPrimitives.WriteInt32BigEndian(versionBytes, version);
@@ -40,8 +43,9 @@ public class SignatureHelperTest
         input.Write(versionBytes);
         input.Write(previousHash);
         WriteKeys(input, added);
-        WriteKeys(input, invites);
+        WriteGrants(input, invites);
         WriteKeys(input, removed);
+        WriteGrants(input, roles);
         input.Write(payload);
 
         return input.ToArray();
@@ -57,12 +61,25 @@ public class SignatureHelperTest
             input.Write(key);
     }
 
+    private static void WriteGrants(Stream input, KeyGrant[] grants)
+    {
+        var count = new byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(count, grants.Length);
+        input.Write(count);
+
+        foreach (var grant in grants.OrderBy(g => Convert.ToHexString(g.PublicKey), StringComparer.Ordinal))
+        {
+            input.Write(grant.PublicKey);
+            input.WriteByte((byte)grant.Role);
+        }
+    }
+
     [Fact]
     public void GenerateHash_ShouldMatchProtocolLayout()
     {
-        var expected = SHA256.HashData(ExpectedSigningInput(_ledgerId, 1, _previousHash, _payload, [], [], []));
+        var expected = SHA256.HashData(ExpectedSigningInput(_ledgerId, 1, _previousHash, _payload, [], [], [], []));
 
-        var hash = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], []));
+        var hash = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [], []));
 
         hash.Should().HaveCount(32);
         hash.Should().Equal(expected);
@@ -71,8 +88,8 @@ public class SignatureHelperTest
     [Fact]
     public void GenerateHash_ShouldBeDeterministic()
     {
-        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], []));
-        var second = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], []));
+        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [], []));
+        var second = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [], []));
 
         first.Should().Equal(second);
     }
@@ -80,8 +97,8 @@ public class SignatureHelperTest
     [Fact]
     public void GenerateHash_ShouldDifferPerLedger()
     {
-        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], []));
-        var second = _sut.GenerateHash(Guid.NewGuid(), 1, _previousHash, _payload, new KeyChanges([], [], []));
+        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [], []));
+        var second = _sut.GenerateHash(Guid.NewGuid(), 1, _previousHash, _payload, new KeyChanges([], [], [], []));
 
         first.Should().NotEqual(second);
     }
@@ -89,8 +106,8 @@ public class SignatureHelperTest
     [Fact]
     public void GenerateHash_ShouldDifferPerVersion()
     {
-        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], []));
-        var second = _sut.GenerateHash(_ledgerId, 2, _previousHash, _payload, new KeyChanges([], [], []));
+        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [], []));
+        var second = _sut.GenerateHash(_ledgerId, 2, _previousHash, _payload, new KeyChanges([], [], [], []));
 
         first.Should().NotEqual(second);
     }
@@ -98,8 +115,8 @@ public class SignatureHelperTest
     [Fact]
     public void GenerateHash_ShouldDifferPerPreviousHash()
     {
-        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], []));
-        var second = _sut.GenerateHash(_ledgerId, 1, Bytes(0x08, 32), _payload, new KeyChanges([], [], []));
+        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [], []));
+        var second = _sut.GenerateHash(_ledgerId, 1, Bytes(0x08, 32), _payload, new KeyChanges([], [], [], []));
 
         first.Should().NotEqual(second);
     }
@@ -110,8 +127,8 @@ public class SignatureHelperTest
         byte[] a = Bytes(0x01, 32);
         byte[] b = Bytes(0x02, 32);
 
-        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([a, b], [], []));
-        var second = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([b, a], [], []));
+        var first = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([a, b], [], [], []));
+        var second = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([b, a], [], [], []));
 
         first.Should().Equal(second);
     }
@@ -121,8 +138,8 @@ public class SignatureHelperTest
     {
         var key = Bytes(0x01, 32);
 
-        var added = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([key], [], []));
-        var removed = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [key]));
+        var added = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([key], [], [], []));
+        var removed = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [key], []));
 
         added.Should().NotEqual(removed);
     }
@@ -132,9 +149,9 @@ public class SignatureHelperTest
     {
         var key = Bytes(0x01, 32);
 
-        var added = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([key], [], []));
-        var invited = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [key], []));
-        var removed = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [key]));
+        var added = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([key], [], [], []));
+        var invited = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], Writers(key), [], []));
+        var removed = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [key], []));
 
         invited.Should().NotEqual(added);
         invited.Should().NotEqual(removed);
@@ -145,8 +162,8 @@ public class SignatureHelperTest
     {
         var key = Bytes(0x01, 32);
 
-        var asKey = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([key], [], []));
-        var asPayload = _sut.GenerateHash(_ledgerId, 1, _previousHash, [.. key, .. _payload], new KeyChanges([], [], []));
+        var asKey = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([key], [], [], []));
+        var asPayload = _sut.GenerateHash(_ledgerId, 1, _previousHash, [.. key, .. _payload], new KeyChanges([], [], [], []));
 
         asKey.Should().NotEqual(asPayload);
     }
@@ -156,7 +173,7 @@ public class SignatureHelperTest
     {
         var key = NewKey();
 
-        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key), Sign(key), new KeyChanges([], [], []));
+        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key), Sign(key), new KeyChanges([], [], [], []));
 
         valid.Should().BeTrue();
     }
@@ -169,7 +186,7 @@ public class SignatureHelperTest
         byte[] b = Bytes(0x02, 32);
 
         var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key),
-            Sign(key, added: [a, b]), new KeyChanges([b, a], [], []));
+            Sign(key, added: [a, b]), new KeyChanges([b, a], [], [], []));
 
         valid.Should().BeTrue();
     }
@@ -180,7 +197,7 @@ public class SignatureHelperTest
         var key = NewKey();
         var impostor = NewKey();
 
-        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key), Sign(impostor), new KeyChanges([], [], []));
+        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key), Sign(impostor), new KeyChanges([], [], [], []));
 
         valid.Should().BeFalse();
     }
@@ -190,7 +207,7 @@ public class SignatureHelperTest
     {
         var key = NewKey();
 
-        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, [9, 9, 9], Public(key), Sign(key), new KeyChanges([], [], []));
+        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, [9, 9, 9], Public(key), Sign(key), new KeyChanges([], [], [], []));
 
         valid.Should().BeFalse();
     }
@@ -200,7 +217,7 @@ public class SignatureHelperTest
     {
         var key = NewKey();
 
-        var valid = _sut.IsValidSignature(_ledgerId, 2, _previousHash, _payload, Public(key), Sign(key), new KeyChanges([], [], []));
+        var valid = _sut.IsValidSignature(_ledgerId, 2, _previousHash, _payload, Public(key), Sign(key), new KeyChanges([], [], [], []));
 
         valid.Should().BeFalse();
     }
@@ -213,7 +230,7 @@ public class SignatureHelperTest
         var swapped = Bytes(0x02, 32);
 
         var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key),
-            Sign(key, added: [signedFor]), new KeyChanges([swapped], [], []));
+            Sign(key, added: [signedFor]), new KeyChanges([swapped], [], [], []));
 
         valid.Should().BeFalse();
     }
@@ -226,7 +243,7 @@ public class SignatureHelperTest
         var injected = Bytes(0x02, 32);
 
         var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key),
-            Sign(key, invites: [signedFor]), new KeyChanges([], [signedFor, injected], []));
+            Sign(key, invites: Writers(signedFor)), new KeyChanges([], Writers(signedFor, injected), [], []));
 
         valid.Should().BeFalse();
     }
@@ -239,9 +256,55 @@ public class SignatureHelperTest
         byte[] b = Bytes(0x02, 32);
 
         var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key),
-            Sign(key, invites: [a, b]), new KeyChanges([], [b, a], []));
+            Sign(key, invites: Writers(a, b)), new KeyChanges([], Writers(b, a), [], []));
 
         valid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void GenerateHash_ShouldMatchProtocolLayout_WithGrants()
+    {
+        var invites = new[] { new KeyGrant(Bytes(0x02, 32), WriteKeyRole.Admin), new KeyGrant(Bytes(0x01, 32), WriteKeyRole.Writer) };
+        var roles = new[] { new KeyGrant(Bytes(0x03, 32), WriteKeyRole.Owner) };
+        var expected = SHA256.HashData(ExpectedSigningInput(_ledgerId, 1, _previousHash, _payload, [], invites, [], roles));
+
+        var hash = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], invites, [], roles));
+
+        hash.Should().Equal(expected);
+    }
+
+    [Fact]
+    public void GenerateHash_ShouldDistinguishInvitesFromRoleChanges()
+    {
+        var grant = new KeyGrant(Bytes(0x01, 32), WriteKeyRole.Admin);
+
+        var invited = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [grant], [], []));
+        var changed = _sut.GenerateHash(_ledgerId, 1, _previousHash, _payload, new KeyChanges([], [], [], [grant]));
+
+        invited.Should().NotEqual(changed);
+    }
+
+    [Fact]
+    public void IsValidSignature_ShouldReturnFalse_WhenInviteRoleChanged()
+    {
+        var key = NewKey();
+        var invite = Bytes(0x01, 32);
+
+        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key),
+            Sign(key, invites: Writers(invite)), new KeyChanges([], [new KeyGrant(invite, WriteKeyRole.Owner)], [], []));
+
+        valid.Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsValidSignature_ShouldReturnFalse_WhenRoleChangeInjected()
+    {
+        var key = NewKey();
+
+        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key),
+            Sign(key), new KeyChanges([], [], [], [new KeyGrant(Bytes(0x01, 32), WriteKeyRole.Owner)]));
+
+        valid.Should().BeFalse();
     }
 
     [Theory]
@@ -252,7 +315,7 @@ public class SignatureHelperTest
     {
         var key = NewKey();
 
-        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Bytes(0xFF, length), Sign(key), new KeyChanges([], [], []));
+        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Bytes(0xFF, length), Sign(key), new KeyChanges([], [], [], []));
 
         valid.Should().BeFalse();
     }
@@ -265,7 +328,7 @@ public class SignatureHelperTest
     {
         var key = NewKey();
 
-        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key), Bytes(0xFF, length), new KeyChanges([], [], []));
+        var valid = _sut.IsValidSignature(_ledgerId, 1, _previousHash, _payload, Public(key), Bytes(0xFF, length), new KeyChanges([], [], [], []));
 
         valid.Should().BeFalse();
     }
