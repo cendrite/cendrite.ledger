@@ -4,6 +4,7 @@ using Ledger.Application.Commands.Append;
 using Ledger.Application.Commands.Archive;
 using Ledger.Application.Interfaces;
 using Ledger.Domain.Common;
+using Ledger.Domain.Enums;
 using Ledger.Infrastructure.Persistence.Context;
 using Ledger.Test.Integration.Setup;
 using Ledger.Test.Integration.Setup.Helpers;
@@ -103,6 +104,33 @@ public class ArchiveLedgerCommandHandlerTest : IntegrationTestBase
         result.Success.Should().BeFalse();
         result.Error!.Type.Should().Be(ErrorType.Forbidden);
         (await LedgerFactory.ReloadAsync(Db, ledger.Id)).Archived.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Handle_Given_Writer_Key_Should_Return_Forbidden()
+    {
+        // Arrange
+        var invite = LedgerSigner.NewKey();
+        var writer = LedgerSigner.NewKey();
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator, inviteKeys: [new KeyGrant(LedgerSigner.PublicKeyOf(invite), WriteKeyRole.Writer)]);
+        var swap = LedgerCommands.Append(ledger) with
+        {
+            KeyChanges = new KeyChanges([LedgerSigner.PublicKeyOf(writer)], [], [LedgerSigner.PublicKeyOf(invite)], []),
+        };
+        (await _append.Handle(swap.SignedBy(invite), CancellationToken.None)).Success.Should().BeTrue();
+        var swapped = await LedgerFactory.ReloadAsync(Db, ledger.Id);
+        var command = LedgerCommands.Archive(swapped).SignedBy(writer);
+
+        // Act
+        var result = await _sut.Handle(command, CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+
+        var stored = await LedgerFactory.ReloadAsync(Db, ledger.Id);
+        stored.Archived.Should().BeFalse();
+        stored.Version.Should().Be(swapped.Version);
     }
 
     [Fact]

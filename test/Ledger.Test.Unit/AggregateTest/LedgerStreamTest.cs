@@ -465,6 +465,69 @@ public class LedgerStreamTest
     }
 
     [Fact]
+    public void Archive_ShouldRefuseWriterKey()
+    {
+        var ledger = LedgerWithMembers();
+        var version = ledger.Version;
+        var hash = ledger.Hash;
+
+        var result = Archive(ledger, OtherKey, Bytes(0x0A, 32));
+
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+        ledger.Archived.Should().BeFalse();
+        ledger.Version.Should().Be(version);
+        ledger.Hash.Should().Equal(hash);
+    }
+
+    [Fact]
+    public void Archive_ShouldAllowAdminKey()
+    {
+        var ledger = LedgerWithMembers();
+
+        var result = Archive(ledger, AdminKey, Bytes(0x0A, 32));
+
+        result.Success.Should().BeTrue();
+        ledger.Archived.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Archive_ShouldAllowOwnerKey()
+    {
+        var ledger = LedgerWithMembers();
+
+        var result = Archive(ledger, CreatorKey, Bytes(0x0A, 32));
+
+        result.Success.Should().BeTrue();
+        ledger.Archived.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Archive_ShouldFollowRoleChanges()
+    {
+        var ledger = LedgerWithMembers();
+        Append(ledger, CreatorKey, Bytes(0x20, 32), roles: [Admin(OtherKey), Writer(AdminKey)]).Success.Should().BeTrue();
+
+        Archive(ledger, AdminKey, Bytes(0x0A, 32)).Success.Should().BeFalse();
+        var result = Archive(ledger, OtherKey, Bytes(0x0B, 32));
+
+        result.Success.Should().BeTrue();
+        ledger.Archived.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Archive_ShouldFailWithNotFound_ForWriterKey_WhenAlreadyArchived()
+    {
+        var ledger = LedgerWithMembers();
+        Archive(ledger, CreatorKey, Bytes(0x0A, 32));
+
+        var result = Archive(ledger, OtherKey, Bytes(0x0B, 32));
+
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.NotFound);
+    }
+
+    [Fact]
     public void Append_ShouldFailWithValidation_WhenOnlyInviteKeysWouldRemain()
     {
         var ledger = LedgerWithInvite();
