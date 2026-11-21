@@ -127,6 +127,9 @@ public sealed class LedgerStream : AggregateRoot
         byte[] writeKeyPublic,
         byte[] signature)
     {
+        if (!Archived && KeyOf(writeKeyPublic) is { IsInvite: false, Role: WriteKeyRole.Writer })
+            return Result.Fail<LedgerEvent>(Error.Forbidden("Only an owner or admin key may archive this ledger."));
+
         var append = Append(
             expectedVersion: expectedVersion,
             previousHash: previousHash,
