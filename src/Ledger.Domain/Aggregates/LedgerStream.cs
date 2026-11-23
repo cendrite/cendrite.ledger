@@ -13,12 +13,14 @@ public sealed class LedgerStream : AggregateRoot
     private const int SignatureLength = 64;
 
     private readonly List<LedgerWriteKey> _writeKeys = [];
+    private readonly List<LedgerRemovedKey> _removedKeys = [];
     private readonly List<LedgerEvent> _events = [];
 
     public int Version { get; private set; }
     public byte[] Hash { get; private set; } = new byte[32];
     public bool Archived { get; private set; }
     public IReadOnlyCollection<LedgerWriteKey> WriteKeys => _writeKeys.AsReadOnly();
+    public IReadOnlyCollection<LedgerRemovedKey> RemovedKeys => _removedKeys.AsReadOnly();
     public IReadOnlyCollection<LedgerEvent> Events => _events.AsReadOnly();
 
     // Private constructor for EF Core
@@ -30,6 +32,11 @@ public sealed class LedgerStream : AggregateRoot
     }
 
     public bool HasWriteKey(byte[] publicKey) => _writeKeys.Any(wk => wk.PublicKey.SequenceEqual(publicKey));
+
+    public int? ReadableUpTo(byte[] publicKey) =>
+        HasWriteKey(publicKey)
+            ? Version
+            : _removedKeys.FirstOrDefault(k => k.PublicKey.AsSpan().SequenceEqual(publicKey))?.RemovedAtVersion;
 
     public Result<LedgerEvent> Append(
             int expectedVersion,
@@ -78,6 +85,9 @@ public sealed class LedgerStream : AggregateRoot
         var evt = new LedgerEvent(Id, Version + 1, payload, previousHash, writeKeyPublic, signature, keyChanges);
 
         _events.Add(evt);
+
+        if (!signer.IsInvite)
+            RecordRemovedKeys(keyChanges.Removed, evt.Version);
 
         foreach (var key in keyChanges.Removed)
             _writeKeys.RemoveAll(k => k.PublicKey.AsSpan().SequenceEqual(key));
@@ -145,6 +155,19 @@ public sealed class LedgerStream : AggregateRoot
         Archived = true;
 
         return append;
+    }
+
+    private void RecordRemovedKeys(IReadOnlyCollection<byte[]> removed, int version)
+    {
+        foreach (var key in removed.Where(HasWriteKey))
+        {
+            var recorded = _removedKeys.FirstOrDefault(k => k.PublicKey.AsSpan().SequenceEqual(key));
+
+            if (recorded is null)
+                _removedKeys.Add(new LedgerRemovedKey(Id, key, version));
+            else
+                recorded.RemovedAgainAt(version);
+        }
     }
 
     private bool IsSelfSwap(byte[] signer, KeyChanges keyChanges) =>

@@ -15,21 +15,19 @@ public sealed class GetLedgerEventsQueryHandler(
     {
         var ledger = await ledgerRepository.GetAsync(new LedgerWithWriteKeysSpec(q.LedgerId), ct);
 
-        if (ledger is null
-            || !ledger.HasWriteKey(q.WriteKeyPublic)
+        if (ledger?.ReadableUpTo(q.WriteKeyPublic) is not { } readableUpTo
             || !signatureHelper.IsValidReadSignature(q.LedgerId, q.Timestamp, q.WriteKeyPublic, q.Signature))
             return Result.Fail<LedgerEventsDto>(Error.NotFound<LedgerStream>(q.LedgerId.ToString()));
 
         var events = await ledgerRepository.GetEventsAsync(q.LedgerId, q.FromVersion, q.Limit + 1, ct);
-
-        var hasMore = events.Count > q.Limit;
+        var readable = events.Where(e => e.Version <= readableUpTo).ToList();
 
         return Result.Ok(new LedgerEventsDto
         {
-            Version = ledger.Version,
-            Archived = ledger.Archived,
-            HasMore = hasMore,
-            Events = [.. events.Take(q.Limit).Select(LedgerEventDto.MapFrom)],
+            Version = readableUpTo,
+            Archived = ledger.Archived && ledger.HasWriteKey(q.WriteKeyPublic),
+            HasMore = readable.Count > q.Limit,
+            Events = [.. readable.Take(q.Limit).Select(LedgerEventDto.MapFrom)],
         });
     }
 }

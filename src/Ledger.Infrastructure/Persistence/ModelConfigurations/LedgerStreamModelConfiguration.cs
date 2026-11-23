@@ -36,6 +36,11 @@ public sealed class LedgerStreamModelConfiguration : BaseModelConfiguration<Ledg
             .HasForeignKey(x => x.StreamId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        builder.HasMany(x => x.RemovedKeys)
+            .WithOne()
+            .HasForeignKey(x => x.StreamId)
+            .OnDelete(DeleteBehavior.Cascade);
+
         builder.HasMany(x => x.Events)
             .WithOne()
             .HasForeignKey(x => x.StreamId)

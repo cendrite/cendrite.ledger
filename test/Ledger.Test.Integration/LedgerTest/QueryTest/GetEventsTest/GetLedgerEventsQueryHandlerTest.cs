@@ -243,26 +243,128 @@ public class GetLedgerEventsQueryHandlerTest : IntegrationTestBase
         result.Error!.Type.Should().Be(ErrorType.NotFound);
     }
 
+    private async Task<LedgerStream> RemoveAsync(LedgerStream ledger, Key removed)
+    {
+        var removal = (LedgerCommands.Append(ledger, [7, 8, 9]) with { KeyChanges = new KeyChanges([], [], [LedgerSigner.PublicKeyOf(removed)], []) }).SignedBy(_creator);
+        (await _append.Handle(removal, CancellationToken.None)).Success.Should().BeTrue();
+
+        return await LedgerFactory.ReloadAsync(Db, ledger.Id);
+    }
+
     [Fact]
-    public async Task Handle_Given_Removed_Key_Should_Return_NotFound_While_Remaining_Member_Can_Read()
+    public async Task Handle_Given_Removed_Key_Should_Read_Up_To_Its_Removal_And_No_Further()
     {
         // Arrange
         var member = LedgerSigner.NewKey();
         var ledger = await LedgerFactory.SeedAsync(Db, _creator);
         ledger = await AppendAsync(ledger, [4, 5, 6], [new KeyGrant(LedgerSigner.PublicKeyOf(member), WriteKeyRole.Writer)]);
-
-        var removal = (LedgerCommands.Append(ledger, [7, 8, 9]) with { KeyChanges = new KeyChanges([], [], [LedgerSigner.PublicKeyOf(member)], []) }).SignedBy(_creator);
-        (await _append.Handle(removal, CancellationToken.None)).Success.Should().BeTrue();
+        ledger = await RemoveAsync(ledger, member);
+        await AppendAsync(ledger, [1, 1, 1]);
 
         // Act
         var removed = await _sut.Handle(Query(ledger.Id, reader: member), CancellationToken.None);
         var remaining = await _sut.Handle(Query(ledger.Id), CancellationToken.None);
 
         // Assert
-        removed.Success.Should().BeFalse();
-        removed.Error!.Type.Should().Be(ErrorType.NotFound);
-        remaining.Success.Should().BeTrue();
-        remaining.RequiredValue.Version.Should().Be(3);
+        var dto = removed.RequiredValue;
+        dto.Version.Should().Be(3);
+        dto.HasMore.Should().BeFalse();
+        dto.Events.Select(e => e.Version).Should().Equal(1, 2, 3);
+        dto.Events.Last().KeyChanges.Removed.Should().ContainSingle().Which.Should().Equal(LedgerSigner.PublicKeyOf(member));
+        remaining.RequiredValue.Version.Should().Be(4);
+    }
+
+    [Fact]
+    public async Task Handle_Given_Removed_Key_Reading_Past_Its_Removal_Should_Return_Empty_Page()
+    {
+        // Arrange
+        var member = LedgerSigner.NewKey();
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator);
+        ledger = await AppendAsync(ledger, [4, 5, 6], [new KeyGrant(LedgerSigner.PublicKeyOf(member), WriteKeyRole.Writer)]);
+        ledger = await RemoveAsync(ledger, member);
+        await AppendAsync(ledger, [1, 1, 1]);
+
+        // Act
+        var result = await _sut.Handle(Query(ledger.Id, fromVersion: 4, reader: member), CancellationToken.None);
+
+        // Assert
+        result.RequiredValue.Version.Should().Be(3);
+        result.RequiredValue.HasMore.Should().BeFalse();
+        result.RequiredValue.Events.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Handle_Given_Removed_Key_Should_Page_Only_Within_Its_Range()
+    {
+        // Arrange
+        var member = LedgerSigner.NewKey();
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator);
+        ledger = await AppendAsync(ledger, [4, 5, 6], [new KeyGrant(LedgerSigner.PublicKeyOf(member), WriteKeyRole.Writer)]);
+        ledger = await RemoveAsync(ledger, member);
+        await AppendAsync(ledger, [1, 1, 1]);
+
+        // Act
+        var first = await _sut.Handle(Query(ledger.Id, limit: 2, reader: member), CancellationToken.None);
+        var last = await _sut.Handle(Query(ledger.Id, fromVersion: 3, limit: 1, reader: member), CancellationToken.None);
+
+        // Assert
+        first.RequiredValue.HasMore.Should().BeTrue();
+        last.RequiredValue.HasMore.Should().BeFalse();
+        last.RequiredValue.Events.Should().ContainSingle().Which.Version.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Handle_Given_Removed_Key_Should_Not_See_A_Later_Archive()
+    {
+        // Arrange
+        var member = LedgerSigner.NewKey();
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator);
+        ledger = await AppendAsync(ledger, [4, 5, 6], [new KeyGrant(LedgerSigner.PublicKeyOf(member), WriteKeyRole.Writer)]);
+        ledger = await RemoveAsync(ledger, member);
+        (await _archive.Handle(LedgerCommands.Archive(ledger).SignedBy(_creator), CancellationToken.None)).Success.Should().BeTrue();
+
+        // Act
+        var result = await _sut.Handle(Query(ledger.Id, reader: member), CancellationToken.None);
+
+        // Assert
+        result.RequiredValue.Archived.Should().BeFalse();
+        result.RequiredValue.Version.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Handle_Given_Invite_Key_Replaced_By_A_Swap_Should_Return_NotFound()
+    {
+        // Arrange
+        var invite = LedgerSigner.NewKey();
+        var writer = LedgerSigner.NewKey();
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator, inviteKeys: [new KeyGrant(LedgerSigner.PublicKeyOf(invite), WriteKeyRole.Writer)]);
+        var swap = (LedgerCommands.Append(ledger) with { KeyChanges = new KeyChanges([LedgerSigner.PublicKeyOf(writer)], [], [LedgerSigner.PublicKeyOf(invite)], []) }).SignedBy(invite);
+        (await _append.Handle(swap, CancellationToken.None)).Success.Should().BeTrue();
+
+        // Act
+        var result = await _sut.Handle(Query(ledger.Id, reader: invite), CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.NotFound);
+    }
+
+    [Fact]
+    public async Task Handle_Given_Removed_Key_Without_Valid_Signature_Should_Return_NotFound()
+    {
+        // Arrange
+        var member = LedgerSigner.NewKey();
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator);
+        ledger = await AppendAsync(ledger, [4, 5, 6], [new KeyGrant(LedgerSigner.PublicKeyOf(member), WriteKeyRole.Writer)]);
+        await RemoveAsync(ledger, member);
+        var query = Query(ledger.Id, reader: member) with { Signature = LedgerSigner.SignRead(_creator, ledger.Id, LedgerSigner.Now()) };
+
+        // Act
+        var result = await _sut.Handle(query, CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.NotFound);
     }
 
     [Fact]

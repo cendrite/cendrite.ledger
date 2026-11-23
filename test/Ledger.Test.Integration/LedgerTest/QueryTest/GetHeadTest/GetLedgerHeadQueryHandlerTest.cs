@@ -6,6 +6,7 @@ using Ledger.Application.Interfaces;
 using Ledger.Application.Queries.GetHead;
 using Ledger.Domain.Aggregates;
 using Ledger.Domain.Common;
+using Ledger.Domain.Enums;
 using Ledger.Infrastructure.Persistence.Context;
 using Ledger.Test.Integration.Setup;
 using Ledger.Test.Integration.Setup.Helpers;
@@ -131,5 +132,22 @@ public class GetLedgerHeadQueryHandlerTest : IntegrationTestBase
         // Assert
         result.Success.Should().BeFalse();
         result.Error.Should().BeEquivalentTo(Error.NotFound<LedgerStream>(ledger.Id.ToString()));
+    }
+
+    [Fact]
+    public async Task Handle_Given_Removed_Key_Should_Return_NotFound()
+    {
+        // Arrange
+        var member = LedgerSigner.NewKey();
+        var ledger = await LedgerFactory.SeedAsync(Db, _creator, inviteKeys: [new KeyGrant(LedgerSigner.PublicKeyOf(member), WriteKeyRole.Writer)]);
+        var removal = (LedgerCommands.Append(ledger) with { KeyChanges = new KeyChanges([], [], [LedgerSigner.PublicKeyOf(member)], []) }).SignedBy(_creator);
+        (await _append.Handle(removal, CancellationToken.None)).Success.Should().BeTrue();
+
+        // Act
+        var result = await _sut.Handle(Query(ledger.Id, reader: member), CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.NotFound);
     }
 }

@@ -5,6 +5,6 @@ internal sealed class LedgerWithWriteKeysSpec : Specification<LedgerStream>
 {
     public LedgerWithWriteKeysSpec(Guid id) : base(ledger => ledger.Id == id)
     {
-        AddIncludes($"{nameof(LedgerStream.WriteKeys)}");
+        AddIncludes($"{nameof(LedgerStream.WriteKeys)}", $"{nameof(LedgerStream.RemovedKeys)}");
     }
 }

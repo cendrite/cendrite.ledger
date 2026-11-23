@@ -156,6 +156,46 @@ namespace Ledger.Infrastructure.Persistence.Migrations
                     b.ToTable("ledger_event", (string)null);
                 });
 
+            modelBuilder.Entity("Ledger.Domain.Entities.LedgerRemovedKey", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("Created")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created");
+
+                    b.Property<DateTime?>("Deleted")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted");
+
+                    b.Property<byte[]>("PublicKey")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("bytea")
+                        .HasColumnName("public_key");
+
+                    b.Property<int>("RemovedAtVersion")
+                        .HasColumnType("integer")
+                        .HasColumnName("removed_at_version");
+
+                    b.Property<Guid>("StreamId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("stream_id");
+
+                    b.Property<DateTime>("Updated")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StreamId", "PublicKey")
+                        .IsUnique();
+
+                    b.ToTable("ledger_removed_key", (string)null);
+                });
+
             modelBuilder.Entity("Ledger.Domain.Entities.LedgerWriteKey", b =>
                 {
                     b.Property<Guid>("Id")
@@ -265,6 +305,15 @@ namespace Ledger.Infrastructure.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("Ledger.Domain.Entities.LedgerRemovedKey", b =>
+                {
+                    b.HasOne("Ledger.Domain.Aggregates.LedgerStream", null)
+                        .WithMany("RemovedKeys")
+                        .HasForeignKey("StreamId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Ledger.Domain.Entities.LedgerWriteKey", b =>
                 {
                     b.HasOne("Ledger.Domain.Aggregates.LedgerStream", null)
@@ -277,6 +326,8 @@ namespace Ledger.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("Ledger.Domain.Aggregates.LedgerStream", b =>
                 {
                     b.Navigation("Events");
+
+                    b.Navigation("RemovedKeys");
 
                     b.Navigation("WriteKeys");
                 });
