@@ -636,4 +636,113 @@ public class LedgerStreamTest
         result.Success.Should().BeFalse();
         result.Error!.Type.Should().Be(ErrorType.Validation);
     }
+
+    [Fact]
+    public void ReadableUpTo_ShouldBeTheHead_ForAnActiveKey()
+    {
+        var ledger = LedgerWithMembers();
+
+        ledger.ReadableUpTo(OtherKey).Should().Be(ledger.Version);
+    }
+
+    [Fact]
+    public void ReadableUpTo_ShouldBeNull_ForAnUnknownKey()
+    {
+        LedgerWithMembers().ReadableUpTo(UnknownKey).Should().BeNull();
+    }
+
+    [Fact]
+    public void ReadableUpTo_ShouldStopAtTheRemoval_ForARemovedKey()
+    {
+        var ledger = LedgerWithMembers();
+        Append(ledger, CreatorKey, Bytes(0x30, 32), removed: [OtherKey]).Success.Should().BeTrue();
+        var removedAt = ledger.Version;
+
+        Append(ledger, CreatorKey, Bytes(0x31, 32)).Success.Should().BeTrue();
+
+        ledger.HasWriteKey(OtherKey).Should().BeFalse();
+        ledger.ReadableUpTo(OtherKey).Should().Be(removedAt);
+    }
+
+    [Fact]
+    public void ReadableUpTo_ShouldBeNull_ForAnInviteKeyReplacedByASwap()
+    {
+        var ledger = LedgerWithInvite();
+
+        Append(ledger, InviteKey, Bytes(0x02, 32), added: [SwappedKey], removed: [InviteKey]).Success.Should().BeTrue();
+
+        ledger.ReadableUpTo(InviteKey).Should().BeNull();
+        ledger.RemovedKeys.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void ReadableUpTo_ShouldStopAtTheRemoval_ForAnInviteKeyRemovedBeforeItsSwap()
+    {
+        var ledger = LedgerWithInvite();
+
+        Append(ledger, CreatorKey, Bytes(0x02, 32), removed: [InviteKey]).Success.Should().BeTrue();
+
+        ledger.ReadableUpTo(InviteKey).Should().Be(2);
+    }
+
+    [Fact]
+    public void ReadableUpTo_ShouldFollowTheHead_WhenARemovedKeyIsInvitedAgain()
+    {
+        var ledger = LedgerWithInvite();
+        Append(ledger, CreatorKey, Bytes(0x02, 32), removed: [InviteKey]).Success.Should().BeTrue();
+
+        Append(ledger, CreatorKey, Bytes(0x03, 32), invites: [Writer(InviteKey)]).Success.Should().BeTrue();
+        Append(ledger, CreatorKey, Bytes(0x04, 32)).Success.Should().BeTrue();
+
+        ledger.ReadableUpTo(InviteKey).Should().Be(ledger.Version);
+    }
+
+    [Fact]
+    public void Append_ShouldMoveTheReadLimit_WhenAKeyIsRemovedAgain()
+    {
+        var ledger = LedgerWithInvite();
+        Append(ledger, CreatorKey, Bytes(0x02, 32), removed: [InviteKey]).Success.Should().BeTrue();
+        Append(ledger, CreatorKey, Bytes(0x03, 32), invites: [Writer(InviteKey)]).Success.Should().BeTrue();
+
+        Append(ledger, CreatorKey, Bytes(0x04, 32), removed: [InviteKey]).Success.Should().BeTrue();
+
+        ledger.RemovedKeys.Should().ContainSingle();
+        ledger.ReadableUpTo(InviteKey).Should().Be(4);
+    }
+
+    [Fact]
+    public void Append_ShouldNotRecord_AKeyThatWasNotInTheLedger()
+    {
+        var ledger = LedgerWithMembers();
+
+        Append(ledger, CreatorKey, Bytes(0x30, 32), removed: [UnknownKey]).Success.Should().BeTrue();
+
+        ledger.RemovedKeys.Should().BeEmpty();
+        ledger.ReadableUpTo(UnknownKey).Should().BeNull();
+    }
+
+    [Fact]
+    public void Append_ShouldRefuse_ARemovedKey()
+    {
+        var ledger = LedgerWithMembers();
+        Append(ledger, CreatorKey, Bytes(0x30, 32), removed: [OtherKey]).Success.Should().BeTrue();
+
+        var result = Append(ledger, OtherKey, Bytes(0x31, 32));
+
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+    }
+
+    [Fact]
+    public void Archive_ShouldRefuse_ARemovedKey()
+    {
+        var ledger = LedgerWithMembers();
+        Append(ledger, CreatorKey, Bytes(0x30, 32), removed: [AdminKey]).Success.Should().BeTrue();
+
+        var result = Archive(ledger, AdminKey, Bytes(0x31, 32));
+
+        result.Success.Should().BeFalse();
+        result.Error!.Type.Should().Be(ErrorType.Forbidden);
+        ledger.Archived.Should().BeFalse();
+    }
 }
